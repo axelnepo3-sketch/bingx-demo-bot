@@ -1,0 +1,43 @@
+{
+  "rules": [
+    {
+      "name": "BTC Long Entry",
+      "enabled": true,
+      "symbol": "BTC-USDT",
+      "side": "BUY",
+      "positionSide": "LONG",
+      "orderType": "MARKET",
+      "quantity": 0.001,
+      "leverage": 10,
+      "condition": "price < 60000"
+    },
+    {
+      "name": "BTC Short Entry",
+      "enabled": false,
+      "symbol": "BTC-USDT",
+      "side": "SELL",
+      "positionSide": "SHORT",
+      "orderType": "MARKET",
+      "quantity": 0.001,
+      "leverage": 10,
+      "condition": "price > 70000"
+    },
+    {
+      "name": "ETH Long Entry",
+      "enabled": false,
+      "symbol": "ETH-USDT",
+      "side": "BUY",
+      "positionSide": "LONG",
+      "orderType": "MARKET",
+      "quantity": 0.01,
+      "leverage": 5,
+      "condition": "price < 3000"
+    }
+  ],
+  "riskManagement": {
+    "_comment": "These are reference values — Claude reads them when making trading decisions",
+    "maxOpenPositions": 3,
+    "maxRiskPerTradePct": 2,
+    "defaultLeverage": 10
+  }
+}

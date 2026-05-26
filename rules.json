@@ -1,0 +1,123 @@
+{
+  "strategy_name":            "MA SCALPER",
+  "version":                  "2.0",
+  "timeframe":                "1m",
+  "watchlist": [
+    "BTC-USDT", "ETH-USDT", "NCCOGOLD2USD-USDT", "SOL-USDT", "NCCOXAG2USD-USDT",
+    "BSB-USDT", "HYPE-USDT", "NCCO1OILWTI2USD-USDT", "ZEC-USDT", "NEAR-USDT",
+    "XRP-USDT", "BILL-USDT", "DOGE-USDT", "SUI-USDT", "NCSINASDAQ1002USD-USDT",
+    "BNB-USDT", "UB-USDT", "NCCO7241OILBRENT2USD-USDT", "NCSKSPCX2USD-USDT", "NIL-USDT",
+    "NCCO1OILBRENT2USD-USDT", "INJ-USDT", "NCSKANTHROPIC2USD-USDT", "ESPORTS-USDT", "BEAT-USDT",
+    "HANTA-USDT", "XAN-USDT", "NCSISP5002USD-USDT", "FIDA-USDT", "NCSKSAMSUNG2USD-USDT",
+    "AVAX-USDT", "NCSKOPENAI2USD-USDT", "ONDO-USDT", "WLD-USDT", "NCFXEUR2USD-USDT",
+    "PLAYSOUT-USDT", "AAVE-USDT", "CHIP-USDT", "ADA-USDT", "NCSKBE2USD-USDT",
+    "DEXE-USDT", "GITLAWB-USDT", "GENIUS-USDT", "TRX-USDT", "NCSKAMD2USD-USDT",
+    "10000NAT-USDT", "BCH-USDT", "LAB-USDT", "LTC-USDT", "GRASS-USDT"
+  ],
+  "watchlist_source":         "top_50_bingx_volume_daily",
+  "watchlist_last_updated":   "2026-05-26T01:33:00Z",
+  "watchlist_refresh":        "daily_midnight_utc",
+  "blacklist":                ["ETHFIUSDT", "DYMUSDT", "SUIUSDT"],
+
+  "indicators": {
+    "MA20":   { "type": "SMA", "length": 10,  "source": "close" },
+    "SMA200": { "type": "SMA", "length": 200, "source": "close" }
+  },
+
+  "strategy_type":  "CONSOLIDATED (single process handles 100% of trading)",
+
+  "entry": {
+    "long":  "First GREEN candle close >= MA20 (OFFSET 0) + body >= 0.02% + consolidation filter",
+    "short": "First RED candle close <= MA20 (OFFSET 0) + body >= 0.02% + consolidation filter",
+    "logic": {
+      "reversal_check":   "Previous candle opposite color (RED for LONG, GREEN for SHORT)",
+      "ma20_check":       "Current close >= MA20 for LONG, <= MA20 for SHORT",
+      "body_size_check":  "(close - open) / open >= 0.0002 (0.02% minimum body)",
+      "purpose":          "Prevents wick-only entries, ensures quality momentum signals"
+    }
+  },
+
+  "exit": {
+    "long":  "MA20 crossover: current close < MA20 AND previous close >= MA20",
+    "short": "MA20 crossover: current close > MA20 AND previous close <= MA20",
+    "logic": {
+      "check_interval":   "Every 10 seconds",
+      "confirmation":     "Requires crossover between current and previous candle",
+      "tracking":         "Logs P&L ($), win count, loss count, win ratio (%)",
+      "purpose":          "Simple, reliable exits with profitability metrics"
+    }
+  },
+
+  "consolidation_filter": {
+    "enabled":      false,
+    "lookback":     5,
+    "range_pct":    0.0005,
+    "action":       "skip_entry",
+    "description":  "DISABLED - Allow trading during consolidation, focus on MA20 + body size",
+    "benefit":      "More frequent entries on reversal signals"
+  },
+
+  "volume_filter": {
+    "enabled":      false,
+    "description":  "REMOVED - Focus on MA20 + consolidation only"
+  },
+
+  "position_sizing": {
+    "risk_pct":     0.01,
+    "max_margin":   500.00,
+    "leverage":     5,
+    "min_notional": 5.00,
+    "qty_formula":  "floor((min(balance × 0.01, 500) × 5) / price, 1 decimal)",
+    "description":  "Risk 1% per trade, max $500 margin, 5× leverage"
+  },
+
+  "limits": {
+    "max_open_positions": 20,
+    "max_trades_per_day": 500,
+    "one_trade_per_symbol": true,
+    "api_delay_ms":       1000,
+    "scan_interval_ms":   10000,
+    "description":        "Max 20 open, 500 trades/day, 1000ms delay (BingX compliance)"
+  },
+
+  "targets": {
+    "daily_profit_usdt":  200,
+    "yearly_profit_usdt": 50000
+  },
+
+  "session": {
+    "filter":    "none",
+    "run":       "24/7",
+    "on_start":  ["balance_check", "daily_reset"]
+  },
+
+  "deployment": {
+    "platform":         "Railway.app",
+    "environment":      "BingX Perpetual Futures DEMO",
+    "api_endpoint":     "open-api-vst.bingx.com",
+    "restart_policy":   "ALWAYS",
+    "process":          "scalper-run.js (CONSOLIDATED BOT — single process, 100% of trading)"
+  },
+
+  "persistence": {
+    "positions.json":    "Open position state (direction, entryPrice, qty, openedAt) — survives restarts",
+    "trades-today.json": "Daily trade counter with date — resets at midnight UTC"
+  },
+
+  "profitability_tracking": {
+    "daily_pnl":        "Realized P&L per trade ($) + daily total",
+    "win_counter":      "Count of profitable trades",
+    "loss_counter":     "Count of losing trades",
+    "win_ratio":        "Percentage of winning trades (win_count / total_trades)",
+    "display_format":   "✅ EXIT SYMBOL DIRECTION ±% | PnL: $X.XX | Daily: $Y.YY | W/L: N/M (R%)",
+    "purpose":          "Real-time profitability visibility"
+  },
+
+  "debug": {
+    "enabled":            "daily_only",
+    "enable_at_startup":  true,
+    "disable_after":      "first_entry_or_exit",
+    "purpose":            "Log critical events only (reduces Railway log bloat)"
+  },
+
+ 
