@@ -67,7 +67,7 @@ async function bingxPost(path, params = {}) {
     .map(([k, v]) => `${k}=${encodeURIComponent(v)}`)
     .join("&");
   const res = await axios.post(`${BASE_URL}${path}?${qs}`, null, {
-    headers: { "X-BX-APIKEY": key, "Content-Type": "application/json" },
+    headers: { "X-BX-APIKEY": key },
   });
   return res.data;
 }
@@ -314,34 +314,79 @@ server.tool(
 
 server.tool(
   "check_signals",
-  "Evaluate rules.json against current prices and report which rules are triggered. Pass execute=true to actually place the orders.",
-  { execute: z.boolean().optional().describe("If true, place orders for triggered rules (default false = dry run)") },
+  "Scan the rules.json watchlist for MA20 entry signals. Pass execute=true to place orders for triggered signals (default false = dry run).",
+  { execute: z.boolean().optional().describe("If true, place orders for triggered signals (default false = dry run)") },
   async ({ execute = false }) => {
     const rules = loadRules();
     if (!rules) return { content: [{ type: "text", text: "rules.json not found." }] };
+
+    const MA_PERIOD   = rules.indicators?.MA20?.length  || 20;
+    const TIMEFRAME   = rules.timeframe                  || "1m";
+    const LEVERAGE    = rules.position_sizing?.leverage  || 5;
+    const RISK_PCT    = rules.position_sizing?.risk_pct  || 0.01;
+    const MAX_MARGIN  = rules.position_sizing?.max_margin || 500;
+    const MIN_BODY    = 0.0002;
+    const blacklist   = new Set(rules.blacklist || []);
+    const watchlist   = (rules.watchlist || []).filter(s => !blacklist.has(s));
+
+    function sma(closes, period) {
+      if (closes.length < period) return null;
+      const sl = closes.slice(-period);
+      return sl.reduce((a, b) => a + b, 0) / period;
+    }
+
+    function checkEntry(candles) {
+      if (candles.length < MA_PERIOD + 2) return null;
+      const curr   = candles[candles.length - 1];
+      const prev   = candles[candles.length - 2];
+      const closes = candles.map(c => c.close);
+      const currMA = sma(closes, MA_PERIOD);
+      if (!currMA) return null;
+      const bodyPct = Math.abs(curr.close - curr.open) / curr.open;
+      if (bodyPct < MIN_BODY) return null;
+      if (curr.close > curr.open && prev.close < prev.open && curr.close >= currMA) return "LONG";
+      if (curr.close < curr.open && prev.close > prev.open && curr.close <= currMA) return "SHORT";
+      return null;
+    }
+
     const results = [];
-    for (const rule of rules.rules || []) {
-      if (!rule.enabled) { results.push(`[SKIP] ${rule.name} (disabled)`); continue; }
+    let triggered = 0;
+
+    for (const sym of watchlist) {
       try {
-        const priceData = await bingxGet("/openApi/swap/v2/quote/price", { symbol: rule.symbol });
-        const currentPrice = parseFloat(priceData?.data?.price || 0);
-        const condition = rule.condition.replace(/price/g, currentPrice);
-        const triggered = Function(`"use strict"; return (${condition})`)();
-        if (triggered) {
-          results.push(`[TRIGGERED] ${rule.name} | ${rule.symbol} price=${currentPrice} | condition: "${rule.condition}"`);
-          if (execute) {
-            const orderParams = { symbol: rule.symbol, side: rule.side, positionSide: rule.positionSide || "BOTH", type: rule.orderType || "MARKET", quantity: rule.quantity };
-            if (rule.leverage) await bingxPost("/openApi/swap/v2/trade/leverage", { symbol: rule.symbol, side: rule.side, leverage: rule.leverage });
-            const order = await bingxPost("/openApi/swap/v2/trade/order", orderParams);
-            results.push(`  -> Order placed: ${JSON.stringify(order?.data || order)}`);
+        const d = await bingxGet("/openApi/swap/v3/quote/klines", { symbol: sym, interval: TIMEFRAME, limit: MA_PERIOD + 3 });
+        if (!Array.isArray(d?.data)) { results.push(`[SKIP] ${sym} — no candle data`); continue; }
+        const candles = d.data.map(c => ({ open: parseFloat(c.open), close: parseFloat(c.close) }));
+        const sig = checkEntry(candles);
+        if (!sig) { results.push(`[NO SIGNAL] ${sym}`); continue; }
+
+        const currPrice = candles[candles.length - 1].close;
+        triggered++;
+        results.push(`[SIGNAL] ${sig.padEnd(5)} ${sym} @ ${currPrice}`);
+
+        if (execute) {
+          const margin   = Math.min(0 * RISK_PCT, MAX_MARGIN); // balance unknown in dry-run context
+          const side         = sig === "LONG" ? "BUY" : "SELL";
+          const positionSide = sig;
+          try { await bingxPost("/openApi/swap/v2/trade/leverage", { symbol: sym, side, leverage: LEVERAGE }); } catch {}
+          const priceData = await bingxGet("/openApi/swap/v2/quote/price", { symbol: sym });
+          const price     = parseFloat(priceData?.data?.price || currPrice);
+          const balData   = await bingxGet("/openApi/swap/v2/user/balance");
+          const bal       = parseFloat(balData?.data?.balance?.availableMargin || 0);
+          const qty       = Math.floor((Math.min(bal * RISK_PCT, MAX_MARGIN) * LEVERAGE / price) * 10) / 10;
+          if (qty > 0) {
+            const order = await bingxPost("/openApi/swap/v2/trade/order", { symbol: sym, side, positionSide, type: "MARKET", quantity: qty });
+            results.push(`  -> Order: ${JSON.stringify(order?.data || order)}`);
+          } else {
+            results.push(`  -> Skipped: qty=0`);
           }
-        } else {
-          results.push(`[NOT MET] ${rule.name} | ${rule.symbol} price=${currentPrice} | condition: "${rule.condition}"`);
         }
       } catch (e) {
-        results.push(`[ERROR] ${rule.name}: ${e.message}`);
+        results.push(`[ERROR] ${sym}: ${e.message}`);
       }
     }
+
+    results.unshift(`MA${MA_PERIOD} Signal Scan — ${watchlist.length} symbols | ${triggered} signal(s) | execute=${execute}`);
     return { content: [{ type: "text", text: results.join("\n") }] };
   }
 );

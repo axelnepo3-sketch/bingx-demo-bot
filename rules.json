@@ -3,24 +3,22 @@
   "version":                  "2.0",
   "timeframe":                "1m",
   "watchlist": [
-    "BTC-USDT", "ETH-USDT", "NCCOGOLD2USD-USDT", "SOL-USDT", "NCCOXAG2USD-USDT",
-    "BSB-USDT", "HYPE-USDT", "NCCO1OILWTI2USD-USDT", "ZEC-USDT", "NEAR-USDT",
-    "XRP-USDT", "BILL-USDT", "DOGE-USDT", "SUI-USDT", "NCSINASDAQ1002USD-USDT",
-    "BNB-USDT", "UB-USDT", "NCCO7241OILBRENT2USD-USDT", "NCSKSPCX2USD-USDT", "NIL-USDT",
-    "NCCO1OILBRENT2USD-USDT", "INJ-USDT", "NCSKANTHROPIC2USD-USDT", "ESPORTS-USDT", "BEAT-USDT",
-    "HANTA-USDT", "XAN-USDT", "NCSISP5002USD-USDT", "FIDA-USDT", "NCSKSAMSUNG2USD-USDT",
-    "AVAX-USDT", "NCSKOPENAI2USD-USDT", "ONDO-USDT", "WLD-USDT", "NCFXEUR2USD-USDT",
-    "PLAYSOUT-USDT", "AAVE-USDT", "CHIP-USDT", "ADA-USDT", "NCSKBE2USD-USDT",
-    "DEXE-USDT", "GITLAWB-USDT", "GENIUS-USDT", "TRX-USDT", "NCSKAMD2USD-USDT",
-    "10000NAT-USDT", "BCH-USDT", "LAB-USDT", "LTC-USDT", "GRASS-USDT"
+    "BTC-USDT", "ETH-USDT", "SOL-USDT", "BSB-USDT", "HYPE-USDT",
+    "ZEC-USDT", "NEAR-USDT", "XRP-USDT", "BILL-USDT", "DOGE-USDT",
+    "BNB-USDT", "UB-USDT", "NIL-USDT", "INJ-USDT", "ESPORTS-USDT",
+    "BEAT-USDT", "HANTA-USDT", "XAN-USDT", "FIDA-USDT", "AVAX-USDT",
+    "ONDO-USDT", "PLAYSOUT-USDT", "AAVE-USDT", "CHIP-USDT", "ADA-USDT",
+    "DEXE-USDT", "GITLAWB-USDT", "GENIUS-USDT", "TRX-USDT", "10000NAT-USDT",
+    "BCH-USDT", "LAB-USDT", "LTC-USDT", "GRASS-USDT", "SUI-USDT",
+    "WLD-USDT"
   ],
   "watchlist_source":         "top_50_bingx_volume_daily",
   "watchlist_last_updated":   "2026-05-26T01:33:00Z",
   "watchlist_refresh":        "daily_midnight_utc",
-  "blacklist":                ["ETHFIUSDT", "DYMUSDT", "SUIUSDT"],
+  "blacklist":                ["ETHFI-USDT", "DYM-USDT", "SUI-USDT", "WLD-USDT"],
 
   "indicators": {
-    "MA20":   { "type": "SMA", "length": 10,  "source": "close" },
+    "MA20":   { "type": "SMA", "length": 20, "source": "close" },
     "SMA200": { "type": "SMA", "length": 200, "source": "close" }
   },
 
@@ -77,7 +75,8 @@
     "one_trade_per_symbol": true,
     "api_delay_ms":       1000,
     "scan_interval_ms":   10000,
-    "description":        "Max 20 open, 500 trades/day, 1000ms delay (BingX compliance)"
+    "stop_loss_pct":      0.015,
+    "description":        "Max 20 open, 500 trades/day, 1000ms delay, 1.5% stop-loss (BingX compliance)"
   },
 
   "targets": {
@@ -96,7 +95,7 @@
     "environment":      "BingX Perpetual Futures DEMO",
     "api_endpoint":     "open-api-vst.bingx.com",
     "restart_policy":   "ALWAYS",
-    "process":          "scalper-run.js (CONSOLIDATED BOT — single process, 100% of trading)"
+    "process":          "bot.js (CONSOLIDATED BOT — single process, 100% of trading)"
   },
 
   "persistence": {
@@ -118,6 +117,5 @@
     "enable_at_startup":  true,
     "disable_after":      "first_entry_or_exit",
     "purpose":            "Log critical events only (reduces Railway log bloat)"
-  },
-
- 
+  }
+}

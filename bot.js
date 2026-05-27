@@ -1,7 +1,7 @@
 /**
- * BingX Demo Trading Bot — MA20 Crossover Strategy
- * Scans top 50 symbols every 5 min on 5m candles
- * 5x leverage | 1% balance per trade | Long & Short
+ * BingX Demo Trading Bot — MA20 Scalper (Consolidated)
+ * Single process: entry scan + exit monitor
+ * All parameters driven by rules.json
  */
 
 import axios from "axios";
@@ -9,15 +9,32 @@ import crypto from "crypto";
 import { readFileSync, existsSync } from "fs";
 import http from "http";
 
-// ── Config ─────────────────────────────────────────────────────────────────────
-const BASE_URL    = "https://open-api-vst.bingx.com";
-const LEVERAGE    = 5;
-const RISK_PCT    = 0.01;        // 1% of available balance per trade
-const TIMEFRAME   = "5m";
-const MA_PERIOD   = 20;
-const TOP_N       = 50;
-const SCAN_MS     = 5 * 60 * 1000;  // 5 minutes
-const PORT        = process.env.PORT || 3000;
+// ── Load rules.json ────────────────────────────────────────────────────────────
+function loadRules() {
+  for (const p of ["./rules.json", "C:/Users/ALEXIS/bingx-mcp/rules.json"]) {
+    try { if (existsSync(p)) return JSON.parse(readFileSync(p, "utf8")); } catch {}
+  }
+  throw new Error("rules.json not found — cannot start");
+}
+const RULES = loadRules();
+
+// ── Config (all from rules.json) ───────────────────────────────────────────────
+const BASE_URL      = "https://open-api-vst.bingx.com";
+const TIMEFRAME     = RULES.timeframe;                          // "1m"
+const MA_PERIOD     = RULES.indicators.MA20.length;             // 20
+const LEVERAGE      = RULES.position_sizing.leverage;           // 5
+const RISK_PCT      = RULES.position_sizing.risk_pct;           // 0.01
+const MAX_MARGIN    = RULES.position_sizing.max_margin;         // 500
+const MAX_OPEN      = RULES.limits.max_open_positions;          // 20
+const MAX_DAILY     = RULES.limits.max_trades_per_day;          // 500
+const API_DELAY_MS  = RULES.limits.api_delay_ms;                // 1000
+const SCAN_MS       = RULES.limits.scan_interval_ms;            // 10000
+const EXIT_POLL_MS  = 10000;   // rules.exit.logic.check_interval = "Every 10 seconds"
+const MIN_BODY_PCT  = 0.0002;  // rules.entry.logic.body_size_check = 0.02%
+const STOP_LOSS_PCT = RULES.limits.stop_loss_pct || 0.015;
+const BLACKLIST     = new Set(RULES.blacklist || []);
+const WATCHLIST     = (RULES.watchlist || []).filter(s => !BLACKLIST.has(s));
+const PORT          = process.env.PORT || 3000;
 
 // ── Credentials ────────────────────────────────────────────────────────────────
 function creds() {
@@ -31,40 +48,49 @@ function creds() {
       const m = line.match(/^\s*([^#=\s]+)\s*=\s*(.+?)\s*$/);
       if (m) vars[m[1]] = m[2];
     }
-    return {
-      k: vars.BINGX_API_KEY    || "",
-      s: vars.BINGX_SECRET_KEY || vars.BINGX_API_SECRET || ""
-    };
+    return { k: vars.BINGX_API_KEY || "", s: vars.BINGX_SECRET_KEY || vars.BINGX_API_SECRET || "" };
   } catch { return { k: "", s: "" }; }
 }
 
+// ── Clock sync (BingX server time offset) ─────────────────────────────────────
+let clockOffset = 0;
+async function syncClock() {
+  try {
+    const r = await axios.get(`${BASE_URL}/openApi/swap/v2/server/time`, { timeout: 5000 });
+    clockOffset = (r.data?.data?.serverTime || Date.now()) - Date.now();
+    log(`⏱  Clock synced: offset=${clockOffset}ms (${Math.round(clockOffset / 3600000)}h)`);
+  } catch (e) { log(`WARN: clock sync failed — ${e.message}`); }
+}
+const bingxNow = () => Date.now() + clockOffset;
+
 // ── API helpers ────────────────────────────────────────────────────────────────
-function sign(params, secret) {
-  const q = Object.keys(params).sort().map(k => `${k}=${params[k]}`).join("&");
-  return crypto.createHmac("sha256", secret).update(q).digest("hex");
+// Sign over sorted params, build query string in same sorted order (BingX requires order match)
+function buildQS(params, secret) {
+  const keys = Object.keys(params).sort();
+  const str  = keys.map(k => `${k}=${params[k]}`).join("&");
+  const sig  = crypto.createHmac("sha256", secret).update(str).digest("hex");
+  return keys.map(k => `${k}=${encodeURIComponent(params[k])}`).join("&") + `&signature=${sig}`;
 }
 
 async function GET(path, params = {}) {
   const { k, s } = creds();
-  const p = { ...params, timestamp: Date.now() };
-  p.signature = sign(p, s);
-  const r = await axios.get(`${BASE_URL}${path}`, { params: p, headers: { "X-BX-APIKEY": k }, timeout: 10000 });
+  const qs = buildQS({ ...params, timestamp: bingxNow() }, s);
+  const r  = await axios.get(`${BASE_URL}${path}?${qs}`, { headers: { "X-BX-APIKEY": k }, timeout: 10000 });
   return r.data;
 }
 
 async function POST(path, params = {}) {
   const { k, s } = creds();
-  const p = { ...params, timestamp: Date.now() };
-  p.signature = sign(p, s);
-  const qs = Object.entries(p).map(([a, b]) => `${a}=${encodeURIComponent(b)}`).join("&");
-  const r = await axios.post(`${BASE_URL}${path}?${qs}`, null, {
-    headers: { "X-BX-APIKEY": k, "Content-Type": "application/json" }, timeout: 10000
+  const qs = buildQS({ ...params, timestamp: bingxNow() }, s);
+  const r  = await axios.post(`${BASE_URL}${path}?${qs}`, null, {
+    headers: { "X-BX-APIKEY": k }, timeout: 10000
   });
   return r.data;
 }
 
-// ── Stats & Logging ────────────────────────────────────────────────────────────
-const stats = { start: new Date().toISOString(), lastScan: null, trades: 0, errors: 0, log: [] };
+// ── Stats & logging ────────────────────────────────────────────────────────────
+const perf  = { wins: 0, losses: 0, dailyPnl: 0 };
+const stats = { start: new Date().toISOString(), lastScan: null, lastExit: null, trades: 0, errors: 0, log: [] };
 
 function log(msg) {
   const line = `[${new Date().toISOString()}] ${msg}`;
@@ -73,183 +99,318 @@ function log(msg) {
   if (stats.log.length > 1000) stats.log.shift();
 }
 
-// ── Rules.json ─────────────────────────────────────────────────────────────────
-function loadRules() {
-  for (const p of ["./rules.json", "C:/Users/ALEXIS/bingx-mcp/rules.json"]) {
-    try { if (existsSync(p)) return JSON.parse(readFileSync(p, "utf8")); } catch {}
+// ── Daily reset ────────────────────────────────────────────────────────────────
+let tradeToday = 0;
+let tradeDate  = new Date().toISOString().slice(0, 10);
+
+function checkDailyReset() {
+  const today = new Date().toISOString().slice(0, 10);
+  if (today !== tradeDate) {
+    tradeDate     = today;
+    tradeToday    = 0;
+    perf.dailyPnl = 0;
+    log("📅 Daily reset — trade counter and P&L cleared");
   }
-  return { rules: [] };
 }
 
-// ── MA20 ───────────────────────────────────────────────────────────────────────
-function ma(closes, period) {
+// ── MA / SMA ───────────────────────────────────────────────────────────────────
+function sma(closes, period) {
   if (closes.length < period) return null;
-  const sl = closes.slice(-period);
-  return sl.reduce((a, b) => a + b, 0) / period;
+  const slice = closes.slice(-period);
+  return slice.reduce((a, b) => a + b, 0) / period;
 }
 
-function crossoverSignal(candles) {
-  if (candles.length < MA_PERIOD + 2) return null;
+// ── Entry signal ───────────────────────────────────────────────────────────────
+// LONG:  GREEN candle (close>open), prev RED (close<open), close >= MA20, body >= 0.02%
+// SHORT: RED candle  (close<open), prev GREEN(close>open), close <= MA20, body >= 0.02%
+// Uses last CLOSED candle (skip the currently-forming bar at index -1)
+function checkEntry(candles) {
+  if (candles.length < MA_PERIOD + 3) return null;
+
+  const curr   = candles[candles.length - 2];  // last closed candle
+  const prev   = candles[candles.length - 3];  // candle before that
   const closes = candles.map(c => c.close);
+  const currMA = sma(closes, MA_PERIOD);
+  if (!currMA) return null;
 
-  const prevMA  = ma(closes.slice(0, -1), MA_PERIOD);
-  const currMA  = ma(closes,              MA_PERIOD);
-  if (!prevMA || !currMA) return null;
+  const bodyPct = Math.abs(curr.close - curr.open) / curr.open;
+  if (bodyPct < MIN_BODY_PCT) return null;
 
-  const prevC = closes[closes.length - 2];
-  const currC = closes[closes.length - 1];
+  const currGreen = curr.close > curr.open;
+  const currRed   = curr.close < curr.open;
+  const prevRed   = prev.close < prev.open;
+  const prevGreen = prev.close > prev.open;
 
-  if (prevC < prevMA && currC > currMA) return "LONG";
-  if (prevC > prevMA && currC < currMA) return "SHORT";
+  if (currGreen && prevRed   && curr.close >= currMA) return "LONG";
+  if (currRed   && prevGreen && curr.close <= currMA) return "SHORT";
   return null;
 }
 
-// ── Market data ────────────────────────────────────────────────────────────────
-async function topSymbols() {
-  try {
-    const d = await GET("/openApi/swap/v2/quote/ticker");
-    const tickers = Array.isArray(d?.data) ? d.data : Object.values(d?.data || {});
-    return tickers
-      .filter(t => t.symbol?.endsWith("-USDT"))
-      .sort((a, b) => parseFloat(b.quoteVolume || b.volume || 0) - parseFloat(a.quoteVolume || a.volume || 0))
-      .slice(0, TOP_N)
-      .map(t => t.symbol);
-  } catch (e) {
-    log(`WARN: topSymbols failed (${e.message}) — using fallback list`);
-    return ["BTC-USDT","ETH-USDT","SOL-USDT","BNB-USDT","XRP-USDT","DOGE-USDT","ADA-USDT","AVAX-USDT","DOT-USDT","MATIC-USDT"];
-  }
+// ── Exit signal ────────────────────────────────────────────────────────────────
+// LONG exit:  curr.close < MA20 AND prev.close >= MA20  (price crossed below)
+// SHORT exit: curr.close > MA20 AND prev.close <= MA20  (price crossed above)
+// Uses last CLOSED candle (skip the currently-forming bar at index -1)
+function checkExit(candles, side) {
+  if (candles.length < MA_PERIOD + 3) return false;
+
+  const closes    = candles.map(c => c.close);
+  const currClose = closes[closes.length - 2];  // last closed candle
+  const prevClose = closes[closes.length - 3];  // candle before that
+  const currMA    = sma(closes, MA_PERIOD);
+  const prevMA    = sma(closes.slice(0, -1), MA_PERIOD);
+  if (!currMA || !prevMA) return false;
+
+  if (side === "LONG")  return currClose < currMA  && prevClose >= prevMA;
+  if (side === "SHORT") return currClose > currMA  && prevClose <= prevMA;
+  return false;
 }
 
-async function candles(symbol) {
+// ── Market data ────────────────────────────────────────────────────────────────
+async function getCandles(symbol) {
   try {
-    const d = await GET("/openApi/swap/v3/quote/klines", { symbol, interval: TIMEFRAME, limit: MA_PERIOD + 2 });
-    if (!d?.data) return [];
-    return d.data.map(c => ({ close: parseFloat(c[4]), time: c[0] }));
+    const d = await GET("/openApi/swap/v3/quote/klines", {
+      symbol, interval: TIMEFRAME, limit: MA_PERIOD + 4
+    });
+    if (!Array.isArray(d?.data)) return [];
+    // v3 klines returns objects: { open, high, low, close, volume, time }
+    return d.data.map(c => ({ time: c.time, open: parseFloat(c.open), close: parseFloat(c.close) }));
   } catch { return []; }
 }
 
-async function balance() {
+async function getBalance() {
   try {
     const d = await GET("/openApi/swap/v2/user/balance");
     return parseFloat(d?.data?.balance?.availableMargin || 0);
   } catch { return 0; }
 }
 
-async function openPositions() {
+async function getOpenPositions() {
   try {
     const d = await GET("/openApi/swap/v2/user/positions");
-    return d?.data || [];
+    return (d?.data || []).filter(p => Math.abs(parseFloat(p.positionAmt || 0)) > 0);
   } catch { return []; }
 }
 
-async function livePrice(symbol) {
+async function getLivePrice(symbol) {
   try {
     const d = await GET("/openApi/swap/v2/quote/price", { symbol });
     return parseFloat(d?.data?.price || 0);
   } catch { return 0; }
 }
 
-// ── Order placement ────────────────────────────────────────────────────────────
-function roundQty(qty, price) {
-  if (price > 10000) return Math.round(qty * 1000) / 1000;   // BTC-level
-  if (price > 100)   return Math.round(qty * 100)  / 100;    // ETH-level
-  if (price > 1)     return Math.round(qty * 10)   / 10;     // SOL-level
-  return Math.round(qty);                                     // Low-price alts
+// ── Position sizing ────────────────────────────────────────────────────────────
+// qty = floor((min(balance × 0.01, 500) × 5) / price, 1 decimal)
+function calcQty(bal, price) {
+  const margin   = Math.min(bal * RISK_PCT, MAX_MARGIN);
+  const notional = margin * LEVERAGE;
+  return Math.floor((notional / price) * 10) / 10;
 }
 
-async function placeOrder(symbol, signal, bal) {
+// ── Place entry order ──────────────────────────────────────────────────────────
+async function placeEntry(symbol, signal, bal) {
   try {
-    const price = await livePrice(symbol);
+    const price = await getLivePrice(symbol);
     if (!price) return;
 
-    const notional = bal * RISK_PCT;            // e.g. 614 VST
-    const qty      = roundQty(notional / price, price);
-    if (qty <= 0) return;
+    const qty      = calcQty(bal, price);
+    const notional = qty * price;
+    if (qty <= 0 || notional < RULES.position_sizing.min_notional) {
+      log(`SKIP ${symbol} qty=${qty} notional=${notional.toFixed(2)} < min`); return;
+    }
 
-    const side         = signal === "LONG" ? "BUY"  : "SELL";
-    const positionSide = signal === "LONG" ? "LONG" : "SHORT";
+    const side         = signal === "LONG" ? "BUY" : "SELL";
+    const positionSide = signal;
 
-    // Set leverage
-    try { await POST("/openApi/swap/v2/trade/leverage", { symbol, side, leverage: LEVERAGE }); } catch {}
+    try { await POST("/openApi/swap/v2/trade/leverage", { symbol, side: signal, leverage: LEVERAGE }); } catch {}
 
-    // Place market order
-    const r = await POST("/openApi/swap/v2/trade/order", { symbol, side, positionSide, type: "MARKET", quantity: qty });
+    const r = await POST("/openApi/swap/v2/trade/order", {
+      symbol, side, positionSide, type: "MARKET", quantity: qty
+    });
 
     if (r?.code === 0) {
       stats.trades++;
-      log(`✅ TRADE  ${signal.padEnd(5)} ${symbol.padEnd(12)} qty=${qty} price=${price} leverage=${LEVERAGE}x`);
+      tradeToday++;
+      log(`✅ ENTRY ${signal.padEnd(5)} ${symbol.padEnd(18)} qty=${qty} @${price} ${LEVERAGE}x`);
+      return true;
     } else {
-      log(`❌ FAILED ${signal.padEnd(5)} ${symbol.padEnd(12)} → ${JSON.stringify(r)}`);
+      log(`❌ ENTRY FAIL  ${symbol} → ${JSON.stringify(r)}`);
     }
   } catch (e) {
     stats.errors++;
-    log(`❌ ERROR  ${symbol} order: ${e.message}`);
+    log(`❌ ENTRY ERROR ${symbol}: ${e.message}`);
   }
 }
 
-// ── Main scan ──────────────────────────────────────────────────────────────────
-async function scan() {
-  stats.lastScan = new Date().toISOString();
-  log("═══ SCAN START ═══");
-
+// ── Place exit order ───────────────────────────────────────────────────────────
+async function placeExit(symbol, positionSide, qty, entryPrice) {
   try {
-    const bal  = await balance();
-    const pos  = await openPositions();
-    const busy = new Set(pos.map(p => p.symbol));
-    const syms = await topSymbols();
+    const exitPrice = await getLivePrice(symbol);
+    if (!exitPrice) return;
 
-    log(`Balance=${bal.toFixed(2)} VST  |  Open=${pos.length}  |  Scanning ${syms.length} symbols`);
+    const side = positionSide === "LONG" ? "SELL" : "BUY";
+    const r    = await POST("/openApi/swap/v2/trade/order", {
+      symbol, side, positionSide, type: "MARKET", quantity: Math.abs(qty)
+    });
 
-    let signals = 0;
-    for (const sym of syms) {
-      if (busy.has(sym)) continue;                        // skip symbols with open position
-      await new Promise(r => setTimeout(r, 120));         // gentle rate-limit between symbols
+    if (r?.code === 0) {
+      const margin   = Math.min(Math.abs(qty) * entryPrice / LEVERAGE, MAX_MARGIN);
+      const pnl      = positionSide === "LONG"
+        ? (exitPrice - entryPrice) / entryPrice * margin * LEVERAGE
+        : (entryPrice - exitPrice) / entryPrice * margin * LEVERAGE;
 
-      const cv = await candles(sym);
-      const sig = crossoverSignal(cv);
+      perf.dailyPnl += pnl;
+      if (pnl >= 0) perf.wins++; else perf.losses++;
+
+      const total    = perf.wins + perf.losses;
+      const winRatio = total ? ((perf.wins / total) * 100).toFixed(1) : "0.0";
+      const pct      = ((exitPrice - entryPrice) / entryPrice * 100).toFixed(3);
+      const icon     = pnl >= 0 ? "✅" : "❌";
+
+      stats.lastExit = new Date().toISOString();
+      log(`${icon} EXIT  ${positionSide.padEnd(5)} ${symbol.padEnd(18)} ${pct}% | PnL: $${pnl.toFixed(2)} | Daily: $${perf.dailyPnl.toFixed(2)} | W/L: ${perf.wins}/${perf.losses} (${winRatio}%)`);
+    } else {
+      log(`❌ EXIT FAIL   ${symbol} → ${JSON.stringify(r)}`);
+    }
+  } catch (e) {
+    stats.errors++;
+    log(`❌ EXIT ERROR  ${symbol}: ${e.message}`);
+  }
+}
+
+// ── Entry scan (every SCAN_MS = 10s) ──────────────────────────────────────────
+let scanning = false;
+async function scanEntry() {
+  if (scanning) return;
+  scanning = true;
+  try {
+    checkDailyReset();
+    stats.lastScan = new Date().toISOString();
+
+    const positions = await getOpenPositions();
+    if (positions.length >= MAX_OPEN) {
+      log(`⏸  Max open positions (${MAX_OPEN}) — skipping entry scan`);
+      return;
+    }
+    if (tradeToday >= MAX_DAILY) {
+      log(`⏸  Daily trade limit (${MAX_DAILY}) — skipping entry scan`);
+      return;
+    }
+
+    const bal  = await getBalance();
+    const busy = new Set(positions.map(p => p.symbol));
+
+    log(`═ ENTRY SCAN | bal=${bal.toFixed(2)} | open=${positions.length}/${MAX_OPEN} | today=${tradeToday}/${MAX_DAILY}`);
+
+    let signals  = 0;
+    let openCount = positions.length;  // track running total mid-scan
+    for (const sym of WATCHLIST) {
+      if (busy.has(sym))           continue;
+      if (tradeToday >= MAX_DAILY) break;
+      if (openCount  >= MAX_OPEN)  break;  // enforce cap mid-scan
+
+      await new Promise(r => setTimeout(r, API_DELAY_MS));
+
+      const cv  = await getCandles(sym);
+      const sig = checkEntry(cv);
       if (!sig) continue;
 
       signals++;
       log(`📊 SIGNAL ${sig.padEnd(5)} ${sym}`);
-      await placeOrder(sym, sig, bal);
+      const placed = await placeEntry(sym, sig, bal);
+      if (placed) { openCount++; busy.add(sym); }
     }
 
-    log(`═══ SCAN END  signals=${signals} total_trades=${stats.trades} ═══`);
+    if (signals > 0) log(`═ ENTRY SCAN DONE | signals=${signals} | trades_today=${tradeToday}`);
   } catch (e) {
     stats.errors++;
     log(`SCAN CRASH: ${e.message}`);
+  } finally {
+    scanning = false;
   }
 }
 
-// ── HTTP server (Railway health check + dashboard) ─────────────────────────────
+// ── Exit monitor (every EXIT_POLL_MS = 10s, independent loop) ─────────────────
+let polling = false;
+async function pollExits() {
+  if (polling) return;
+  polling = true;
+  try {
+    const positions = await getOpenPositions();
+    if (!positions.length) return;
+
+    for (const pos of positions) {
+      const sym   = pos.symbol;
+      const side  = pos.positionSide;
+      const qty   = parseFloat(pos.positionAmt  || 0);
+      const entry = parseFloat(pos.avgPrice     || pos.entryPrice || 0);
+
+      if (!qty || !["LONG", "SHORT"].includes(side)) continue;
+
+      const cv = await getCandles(sym);
+      if (!cv.length) continue;
+
+      // Stop-loss: exit if unrealized move >= 1.5% against position
+      const curPrice      = cv[cv.length - 1].close;
+      const unrealizedPct = side === "LONG"
+        ? (curPrice - entry) / entry
+        : (entry - curPrice) / entry;
+
+      if (unrealizedPct <= -STOP_LOSS_PCT) {
+        log(`🛑 STOP LOSS ${side.padEnd(5)} ${sym} — unrealized ${(unrealizedPct * 100).toFixed(3)}%`);
+        await placeExit(sym, side, qty, entry);
+        await new Promise(r => setTimeout(r, API_DELAY_MS));
+        continue;
+      }
+
+      if (!checkExit(cv, side)) continue;
+
+      log(`🔔 EXIT SIGNAL ${side.padEnd(5)} ${sym} — MA20 crossover`);
+      await placeExit(sym, side, qty, entry);
+      await new Promise(r => setTimeout(r, API_DELAY_MS));
+    }
+  } catch (e) {
+    log(`EXIT POLL ERROR: ${e.message}`);
+  } finally {
+    polling = false;
+  }
+}
+
+// ── HTTP dashboard ─────────────────────────────────────────────────────────────
 http.createServer((req, res) => {
   if (req.url === "/log") {
     res.writeHead(200, { "Content-Type": "text/plain" });
     res.end(stats.log.slice(-200).join("\n"));
   } else if (req.url === "/status") {
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ ...stats, log: undefined, recentLog: stats.log.slice(-50) }, null, 2));
+    res.end(JSON.stringify({ ...stats, perf, log: undefined, recentLog: stats.log.slice(-50) }, null, 2));
   } else {
+    const total    = perf.wins + perf.losses;
+    const winRatio = total ? `${((perf.wins / total) * 100).toFixed(1)}%` : "0%";
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({
-      status:    "🟢 running",
-      uptime:    Math.round(process.uptime()) + "s",
-      trades:    stats.trades,
-      errors:    stats.errors,
-      lastScan:  stats.lastScan,
-      strategy:  `MA${MA_PERIOD} crossover | ${TIMEFRAME} | top ${TOP_N} symbols`,
-      leverage:  `${LEVERAGE}x`,
-      riskPct:   `${RISK_PCT * 100}%`,
-    }));
+      status:      "🟢 running",
+      strategy:    `${RULES.strategy_name} v${RULES.version} | MA${MA_PERIOD} | ${TIMEFRAME}`,
+      uptime:      Math.round(process.uptime()) + "s",
+      trades:      stats.trades,
+      todayTrades: `${tradeToday}/${MAX_DAILY}`,
+      errors:      stats.errors,
+      lastScan:    stats.lastScan,
+      lastExit:    stats.lastExit,
+      perf:        { wins: perf.wins, losses: perf.losses, winRatio, dailyPnl: `$${perf.dailyPnl.toFixed(2)}` },
+      config:      { timeframe: TIMEFRAME, maPeriod: MA_PERIOD, leverage: `${LEVERAGE}x`, riskPct: `${RISK_PCT * 100}%`, maxMargin: `$${MAX_MARGIN}`, maxOpen: MAX_OPEN, watchlist: WATCHLIST.length }
+    }, null, 2));
   }
 }).listen(PORT, () => log(`🌐 Dashboard → http://localhost:${PORT}`));
 
 // ── Boot ───────────────────────────────────────────────────────────────────────
-log("🤖 BingX Demo Bot — MA20 Crossover Strategy");
-log(`   Timeframe : ${TIMEFRAME}  |  MA period : ${MA_PERIOD}`);
-log(`   Leverage  : ${LEVERAGE}x  |  Risk      : ${RISK_PCT * 100}% per trade`);
-log(`   Symbols   : Top ${TOP_N} by volume`);
-log(`   Scan      : every ${SCAN_MS / 60000} min`);
+await syncClock();
+log(`🤖 ${RULES.strategy_name} v${RULES.version} — Consolidated Bot`);
+log(`   Timeframe  : ${TIMEFRAME}  |  MA period  : ${MA_PERIOD}`);
+log(`   Leverage   : ${LEVERAGE}x  |  Risk       : ${RISK_PCT * 100}%  |  Max margin : $${MAX_MARGIN}`);
+log(`   Watchlist  : ${WATCHLIST.length} symbols (${BLACKLIST.size} blacklisted)`);
+log(`   Entry scan : every ${SCAN_MS / 1000}s  |  Exit poll : every ${EXIT_POLL_MS / 1000}s`);
+log(`   Limits     : ${MAX_OPEN} open positions | ${MAX_DAILY} trades/day | ${API_DELAY_MS}ms API delay`);
 
-await scan();
-setInterval(scan, SCAN_MS);
+await scanEntry();
+setInterval(scanEntry, SCAN_MS);
+setInterval(pollExits, EXIT_POLL_MS);
