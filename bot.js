@@ -268,20 +268,23 @@ async function placeExit(symbol, positionSide, qty, entryPrice) {
 
     if (r?.code === 0) {
       const margin   = Math.min(Math.abs(qty) * entryPrice / LEVERAGE, MAX_MARGIN);
-      const pnl      = positionSide === "LONG"
-        ? (exitPrice - entryPrice) / entryPrice * margin * LEVERAGE
-        : (entryPrice - exitPrice) / entryPrice * margin * LEVERAGE;
+      // pricePct = raw price move; pnl = leveraged P&L on margin
+      const pricePct = positionSide === "LONG"
+        ? (exitPrice - entryPrice) / entryPrice
+        : (entryPrice - exitPrice) / entryPrice;
+      const pnl      = pricePct * margin * LEVERAGE;
+      const pnlPct   = pricePct * LEVERAGE * 100;  // % of margin
 
       perf.dailyPnl += pnl;
       if (pnl >= 0) perf.wins++; else perf.losses++;
 
       const total    = perf.wins + perf.losses;
       const winRatio = total ? ((perf.wins / total) * 100).toFixed(1) : "0.0";
-      const pct      = ((exitPrice - entryPrice) / entryPrice * 100).toFixed(3);
+      const pct      = (pricePct * 100).toFixed(3);
       const icon     = pnl >= 0 ? "✅" : "❌";
 
       stats.lastExit = new Date().toISOString();
-      log(`${icon} EXIT  ${positionSide.padEnd(5)} ${symbol.padEnd(18)} ${pct}% | PnL: $${pnl.toFixed(2)} | Daily: $${perf.dailyPnl.toFixed(2)} | W/L: ${perf.wins}/${perf.losses} (${winRatio}%)`);
+      log(`${icon} EXIT  ${positionSide.padEnd(5)} ${symbol.padEnd(18)} price:${pct}% margin:${pnlPct.toFixed(2)}% | PnL: $${pnl.toFixed(2)} | Daily: $${perf.dailyPnl.toFixed(2)} | W/L: ${perf.wins}/${perf.losses} (${winRatio}%)`);
     } else {
       log(`❌ EXIT FAIL   ${symbol} → ${JSON.stringify(r)}`);
     }
@@ -344,9 +347,13 @@ async function scanEntry() {
 }
 
 // ── Exit monitor (every EXIT_POLL_MS = 10s, independent loop) ─────────────────
+// Stop-loss: -3% unrealized PnL relative to MARGIN (not notional)
+//   At 5x leverage: -3% margin PnL = -0.6% price move
+//   Formula A (preferred): unrealizedProfit / initialMargin  ← BingX's own numbers
+//   Formula B (fallback):  (priceDelta / entry) * LEVERAGE   ← calculated from live price
 // Priority order per position:
-//   1. LIVE price stop-loss check first  (-3% unrealized PnL → IMMEDIATE exit)
-//   2. MA20 crossover check via candles  (only if stop-loss not triggered)
+//   1. Stop-loss check  (IMMEDIATE — BingX field or live price)
+//   2. MA20 crossover   (candles — only if stop not triggered)
 let polling = false;
 async function pollExits() {
   if (polling) return;
@@ -364,27 +371,44 @@ async function pollExits() {
       if (!qty || !["LONG", "SHORT"].includes(side)) continue;
       if (!entry) continue;
 
-      // ── STEP 1: STOP-LOSS via LIVE price (fast, no candle fetch needed) ──────
-      const livePrice = await getLivePrice(sym);
-      if (livePrice > 0) {
-        const unrealizedPct = side === "LONG"
-          ? (livePrice - entry) / entry
-          : (entry - livePrice) / entry;
+      // ── STEP 1: STOP-LOSS (-3% PnL on margin) ────────────────────────────────
+      let pnlPct    = null;   // unrealized PnL as fraction of margin (negative = loss)
+      let pnlUsd    = null;
+      let pnlSource = "";
 
-        if (unrealizedPct <= -STOP_LOSS_PCT) {
+      // Method A: use BingX's own unrealizedProfit + initialMargin (most accurate)
+      const bxPnl    = parseFloat(pos.unrealizedProfit ?? "NaN");
+      const bxMargin = parseFloat(pos.initialMargin    ?? pos.margin ?? "NaN");
+      if (isFinite(bxPnl) && isFinite(bxMargin) && bxMargin > 0) {
+        pnlPct    = bxPnl / bxMargin;
+        pnlUsd    = bxPnl;
+        pnlSource = "bingx";
+      }
+
+      // Method B: fallback — live price × leverage
+      if (pnlPct === null) {
+        const livePrice = await getLivePrice(sym);
+        if (livePrice > 0) {
+          const pricePct = side === "LONG"
+            ? (livePrice - entry) / entry
+            : (entry - livePrice) / entry;
+          pnlPct    = pricePct * LEVERAGE;
           const margin = Math.min(Math.abs(qty) * entry / LEVERAGE, MAX_MARGIN);
-          const pnlUsd = unrealizedPct * margin * LEVERAGE;
-          log(`🛑 STOP LOSS  ${side.padEnd(5)} ${sym} — ${(unrealizedPct * 100).toFixed(3)}% | ~$${pnlUsd.toFixed(2)} | livePrice=${livePrice}`);
-          await placeExit(sym, side, qty, entry);
-          await new Promise(r => setTimeout(r, API_DELAY_MS));
-          continue;  // skip MA20 check for this position
+          pnlUsd    = pricePct * margin * LEVERAGE;
+          pnlSource = "live";
         }
       }
 
-      // ── STEP 2: MA20 crossover check (requires candle history) ───────────────
+      if (pnlPct !== null && pnlPct <= -STOP_LOSS_PCT) {
+        log(`🛑 STOP LOSS  ${side.padEnd(5)} ${sym.padEnd(18)} | PnL: ${(pnlPct * 100).toFixed(2)}% | $${(pnlUsd ?? 0).toFixed(2)} [${pnlSource}] → CLOSING NOW`);
+        await placeExit(sym, side, qty, entry);
+        await new Promise(r => setTimeout(r, API_DELAY_MS));
+        continue;
+      }
+
+      // ── STEP 2: MA20 crossover check ──────────────────────────────────────────
       const cv = await getCandles(sym);
       if (!cv.length) continue;
-
       if (!checkExit(cv, side)) continue;
 
       log(`🔔 EXIT SIGNAL ${side.padEnd(5)} ${sym} — MA20 crossover`);

@@ -2,15 +2,7 @@
   "strategy_name":            "MA SCALPER",
   "version":                  "2.0",
   "timeframe":                "1m",
-  "watchlist": [
-    "BTC-USDT", "ETH-USDT", "SOL-USDT", "BSB-USDT", "HYPE-USDT",
-    "ZEC-USDT", "NEAR-USDT", "XRP-USDT", "BILL-USDT", "DOGE-USDT",
-    "BNB-USDT", "UB-USDT", "NIL-USDT", "INJ-USDT", "ESPORTS-USDT",
-    "BEAT-USDT", "HANTA-USDT", "XAN-USDT", "FIDA-USDT", "AVAX-USDT",
-    "ONDO-USDT", "PLAYSOUT-USDT", "AAVE-USDT", "CHIP-USDT", "ADA-USDT",
-    "DEXE-USDT", "GITLAWB-USDT", "GENIUS-USDT", "TRX-USDT", "10000NAT-USDT",
-    "BCH-USDT", "LAB-USDT", "LTC-USDT", "GRASS-USDT", "SUI-USDT",
-    "WLD-USDT"
+  
   ],
   "watchlist_source":         "top_50_bingx_volume_daily",
   "watchlist_last_updated":   "2026-05-26T01:33:00Z",
@@ -24,35 +16,23 @@
 
   "strategy_type":  "CONSOLIDATED (single process handles 100% of trading)",
 
-  "bias_filter": {
-    "indicator":    "SMA200",
-    "long_bias":    "MA20 strictly > SMA200 — bullish trend, LONG entries only",
-    "short_bias":   "MA20 strictly < SMA200 — bearish trend, SHORT entries only",
-    "neutral":      "MA20 == SMA200 — no clear trend, skip all entries",
-    "purpose":      "Trade WITH the macro trend only. Avoid counter-trend entries."
-  },
-
   "entry": {
-    "long":  "GREEN candle close >= MA20 + prev RED + body >= 0.02% + MA20 > SMA200 (IMMEDIATELY on signal)",
-    "short": "RED candle close <= MA20 + prev GREEN + body >= 0.02% + MA20 < SMA200 (IMMEDIATELY on signal)",
-    "order_type": "MARKET — fills immediately at best available price",
+    "long":  "First GREEN candle close >= MA20 (OFFSET 0) + body >= 0.02% + consolidation filter",
+    "short": "First RED candle close <= MA20 (OFFSET 0) + body >= 0.02% + consolidation filter",
     "logic": {
-      "bias_check":       "MA20 vs SMA200 checked first — wrong trend bias skips entry",
       "reversal_check":   "Previous candle opposite color (RED for LONG, GREEN for SHORT)",
       "ma20_check":       "Current close >= MA20 for LONG, <= MA20 for SHORT",
       "body_size_check":  "(close - open) / open >= 0.0002 (0.02% minimum body)",
-      "purpose":          "Trend-filtered reversals — high probability entries with momentum"
+      "purpose":          "Prevents wick-only entries, ensures quality momentum signals"
     }
   },
 
   "exit": {
-    "long":  "MA20 crossover: current close < MA20 AND previous close >= MA20 (IMMEDIATELY on signal)",
-    "short": "MA20 crossover: current close > MA20 AND previous close <= MA20 (IMMEDIATELY on signal)",
-    "stop_loss": "3% unrealized PnL loss from entry — hard stop, checked every 10 seconds with LIVE price",
-    "order_type": "MARKET — fills immediately at best available price",
+    "long":  "MA20 crossover: current close < MA20 AND previous close >= MA20",
+    "short": "MA20 crossover: current close > MA20 AND previous close <= MA20",
     "logic": {
       "check_interval":   "Every 10 seconds",
-      "confirmation":     "Requires crossover between current and previous candle",
+      "confirmation":     "Requires crossover between MA20 and previous candle",
       "tracking":         "Logs P&L ($), win count, loss count, win ratio (%)",
       "purpose":          "Simple, reliable exits with profitability metrics"
     }
@@ -63,13 +43,13 @@
     "lookback":     5,
     "range_pct":    0.0005,
     "action":       "skip_entry",
-    "description":  "DISABLED - Allow trading during consolidation, focus on MA20 + body size",
+    "description":  "Allow trading during consolidation, focus on MA20 + body size",
     "benefit":      "More frequent entries on reversal signals"
   },
 
   "volume_filter": {
-    "enabled":      false,
-    "description":  "REMOVED - Focus on MA20 + consolidation only"
+    "enabled":      true,
+    "description":  "Focus on MA20 + consolidation only"
   },
 
   "position_sizing": {
@@ -87,8 +67,8 @@
     "one_trade_per_symbol": true,
     "api_delay_ms":       1000,
     "scan_interval_ms":   10000,
-    "stop_loss_pct":      0.03,
-    "description":        "Max 20 open, 500 trades/day, 1000ms delay, 3% unrealized PnL stop-loss"
+    "stop_loss_pct":      0.015,
+    "description":        "Max 20 open, 500 trades/day, 1000ms delay, 1.5% stop-loss (BingX compliance)"
   },
 
   "targets": {
