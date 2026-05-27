@@ -24,20 +24,32 @@
 
   "strategy_type":  "CONSOLIDATED (single process handles 100% of trading)",
 
+  "bias_filter": {
+    "indicator":    "SMA200",
+    "long_bias":    "MA20 strictly > SMA200 — bullish trend, LONG entries only",
+    "short_bias":   "MA20 strictly < SMA200 — bearish trend, SHORT entries only",
+    "neutral":      "MA20 == SMA200 — no clear trend, skip all entries",
+    "purpose":      "Trade WITH the macro trend only. Avoid counter-trend entries."
+  },
+
   "entry": {
-    "long":  "First GREEN candle close >= MA20 (OFFSET 0) + body >= 0.02% + consolidation filter",
-    "short": "First RED candle close <= MA20 (OFFSET 0) + body >= 0.02% + consolidation filter",
+    "long":  "GREEN candle close >= MA20 + prev RED + body >= 0.02% + MA20 > SMA200 (IMMEDIATELY on signal)",
+    "short": "RED candle close <= MA20 + prev GREEN + body >= 0.02% + MA20 < SMA200 (IMMEDIATELY on signal)",
+    "order_type": "MARKET — fills immediately at best available price",
     "logic": {
+      "bias_check":       "MA20 vs SMA200 checked first — wrong trend bias skips entry",
       "reversal_check":   "Previous candle opposite color (RED for LONG, GREEN for SHORT)",
       "ma20_check":       "Current close >= MA20 for LONG, <= MA20 for SHORT",
       "body_size_check":  "(close - open) / open >= 0.0002 (0.02% minimum body)",
-      "purpose":          "Prevents wick-only entries, ensures quality momentum signals"
+      "purpose":          "Trend-filtered reversals — high probability entries with momentum"
     }
   },
 
   "exit": {
-    "long":  "MA20 crossover: current close < MA20 AND previous close >= MA20",
-    "short": "MA20 crossover: current close > MA20 AND previous close <= MA20",
+    "long":  "MA20 crossover: current close < MA20 AND previous close >= MA20 (IMMEDIATELY on signal)",
+    "short": "MA20 crossover: current close > MA20 AND previous close <= MA20 (IMMEDIATELY on signal)",
+    "stop_loss": "1.5% unrealized loss from entry — hard stop, checked every 10 seconds",
+    "order_type": "MARKET — fills immediately at best available price",
     "logic": {
       "check_interval":   "Every 10 seconds",
       "confirmation":     "Requires crossover between current and previous candle",

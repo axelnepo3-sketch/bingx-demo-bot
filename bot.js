@@ -22,6 +22,7 @@ const RULES = loadRules();
 const BASE_URL      = "https://open-api-vst.bingx.com";
 const TIMEFRAME     = RULES.timeframe;                          // "1m"
 const MA_PERIOD     = RULES.indicators.MA20.length;             // 20
+const SMA_PERIOD    = RULES.indicators.SMA200.length;           // 200
 const LEVERAGE      = RULES.position_sizing.leverage;           // 5
 const RISK_PCT      = RULES.position_sizing.risk_pct;           // 0.01
 const MAX_MARGIN    = RULES.position_sizing.max_margin;         // 500
@@ -122,16 +123,29 @@ function sma(closes, period) {
 
 // ── Entry signal ───────────────────────────────────────────────────────────────
 // LONG:  GREEN candle (close>open), prev RED (close<open), close >= MA20, body >= 0.02%
+//        BIAS: only if MA20 > SMA200 strictly (bullish trend)
 // SHORT: RED candle  (close<open), prev GREEN(close>open), close <= MA20, body >= 0.02%
+//        BIAS: only if MA20 < SMA200 strictly (bearish trend)
+// MA20 == SMA200 → no entries (no clear trend)
 // Uses last CLOSED candle (skip the currently-forming bar at index -1)
 function checkEntry(candles) {
-  if (candles.length < MA_PERIOD + 3) return null;
+  if (candles.length < SMA_PERIOD + 3) return null;
 
   const curr   = candles[candles.length - 2];  // last closed candle
   const prev   = candles[candles.length - 3];  // candle before that
   const closes = candles.map(c => c.close);
-  const currMA = sma(closes, MA_PERIOD);
-  if (!currMA) return null;
+
+  const currMA20  = sma(closes, MA_PERIOD);
+  const currSMA200 = sma(closes, SMA_PERIOD);
+  if (!currMA20 || !currSMA200) return null;
+
+  // ── SMA200 BIAS FILTER ──────────────────────────────────────────────────────
+  // MA20 strictly > SMA200 → bullish trend, LONG only
+  // MA20 strictly < SMA200 → bearish trend, SHORT only
+  // MA20 == SMA200          → no clear trend, skip
+  const bullish = currMA20 > currSMA200;
+  const bearish = currMA20 < currSMA200;
+  if (!bullish && !bearish) return null;  // exactly equal → skip
 
   const bodyPct = Math.abs(curr.close - curr.open) / curr.open;
   if (bodyPct < MIN_BODY_PCT) return null;
@@ -141,8 +155,8 @@ function checkEntry(candles) {
   const prevRed   = prev.close < prev.open;
   const prevGreen = prev.close > prev.open;
 
-  if (currGreen && prevRed   && curr.close >= currMA) return "LONG";
-  if (currRed   && prevGreen && curr.close <= currMA) return "SHORT";
+  if (bullish && currGreen && prevRed   && curr.close >= currMA20) return "LONG";
+  if (bearish && currRed   && prevGreen && curr.close <= currMA20) return "SHORT";
   return null;
 }
 
@@ -151,7 +165,7 @@ function checkEntry(candles) {
 // SHORT exit: curr.close > MA20 AND prev.close <= MA20  (price crossed above)
 // Uses last CLOSED candle (skip the currently-forming bar at index -1)
 function checkExit(candles, side) {
-  if (candles.length < MA_PERIOD + 3) return false;
+  if (candles.length < SMA_PERIOD + 3) return false;
 
   const closes    = candles.map(c => c.close);
   const currClose = closes[closes.length - 2];  // last closed candle
@@ -169,7 +183,7 @@ function checkExit(candles, side) {
 async function getCandles(symbol) {
   try {
     const d = await GET("/openApi/swap/v3/quote/klines", {
-      symbol, interval: TIMEFRAME, limit: MA_PERIOD + 4
+      symbol, interval: TIMEFRAME, limit: SMA_PERIOD + 4   // 204 — enough for SMA200
     });
     if (!Array.isArray(d?.data)) return [];
     // v3 klines returns objects: { open, high, low, close, volume, time }
@@ -405,7 +419,8 @@ http.createServer((req, res) => {
 // ── Boot ───────────────────────────────────────────────────────────────────────
 await syncClock();
 log(`🤖 ${RULES.strategy_name} v${RULES.version} — Consolidated Bot`);
-log(`   Timeframe  : ${TIMEFRAME}  |  MA period  : ${MA_PERIOD}`);
+log(`   Timeframe  : ${TIMEFRAME}  |  MA20=${MA_PERIOD}  |  SMA200=${SMA_PERIOD}`);
+log(`   Bias       : LONG only when MA20>SMA200 | SHORT only when MA20<SMA200`);
 log(`   Leverage   : ${LEVERAGE}x  |  Risk       : ${RISK_PCT * 100}%  |  Max margin : $${MAX_MARGIN}`);
 log(`   Watchlist  : ${WATCHLIST.length} symbols (${BLACKLIST.size} blacklisted)`);
 log(`   Entry scan : every ${SCAN_MS / 1000}s  |  Exit poll : every ${EXIT_POLL_MS / 1000}s`);
