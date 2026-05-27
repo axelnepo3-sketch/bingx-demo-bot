@@ -15,7 +15,7 @@
   "watchlist_source":         "top_50_bingx_volume_daily",
   "watchlist_last_updated":   "2026-05-26T01:33:00Z",
   "watchlist_refresh":        "daily_midnight_utc",
-  "blacklist":                ["ETHFI-USDT", "DYM-USDT", "SUI-USDT", "WLD-USDT", "10000NAT-USDT", "LAB-USDT"],
+  "blacklist":                ["ETHFI-USDT", "DYM-USDT", "SUI-USDT", "WLD-USDT", "10000NAT-USDT", "LAB-USDT", "BSB-USDT"],
 
   "indicators": {
     "MA20":   { "type": "SMA", "length": 20,  "source": "close" },
