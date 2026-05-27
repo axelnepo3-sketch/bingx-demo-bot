@@ -91,10 +91,12 @@
     "max_open_positions":  20,
     "max_trades_per_day":  500,
     "one_trade_per_symbol": true,
-    "api_delay_ms":        1000,
-    "scan_interval_ms":    10000,
+    "fetch_delay_ms":      200,
+    "api_delay_ms":        500,
+    "scan_interval_ms":    5000,
+    "exit_poll_ms":        5000,
     "stop_loss_pct":       0.03,
-    "description":         "Max 20 open positions, 500 trades/day, 1000ms API delay, -3% PnL stop-loss"
+    "description":         "Max 20 open, 500/day | fetch:200ms between symbols | order:500ms after placement | scan/exit:5s | stop:-3% PnL"
   },
 
   "targets": {

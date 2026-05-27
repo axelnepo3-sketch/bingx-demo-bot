@@ -19,23 +19,30 @@ function loadRules() {
 const RULES = loadRules();
 
 // ── Config (all from rules.json) ───────────────────────────────────────────────
-const BASE_URL      = "https://open-api-vst.bingx.com";
-const TIMEFRAME     = RULES.timeframe;                          // "1m"
-const MA_PERIOD     = RULES.indicators.MA20.length;             // 20
-const SMA_PERIOD    = RULES.indicators.SMA200.length;           // 200
-const LEVERAGE      = RULES.position_sizing.leverage;           // 5
-const RISK_PCT      = RULES.position_sizing.risk_pct;           // 0.01
-const MAX_MARGIN    = RULES.position_sizing.max_margin;         // 500
-const MAX_OPEN      = RULES.limits.max_open_positions;          // 20
-const MAX_DAILY     = RULES.limits.max_trades_per_day;          // 500
-const API_DELAY_MS  = RULES.limits.api_delay_ms;                // 1000
-const SCAN_MS       = RULES.limits.scan_interval_ms;            // 10000
-const EXIT_POLL_MS  = 10000;   // rules.exit.logic.check_interval = "Every 10 seconds"
-const MIN_BODY_PCT  = 0.0002;  // rules.entry.logic.body_size_check = 0.02%
-const STOP_LOSS_PCT = RULES.limits.stop_loss_pct || 0.015;
-const BLACKLIST     = new Set(RULES.blacklist || []);
-const WATCHLIST     = (RULES.watchlist || []).filter(s => !BLACKLIST.has(s));
-const PORT          = process.env.PORT || 3000;
+const BASE_URL       = "https://open-api-vst.bingx.com";
+const TIMEFRAME      = RULES.timeframe;                          // "1m"
+const MA_PERIOD      = RULES.indicators.MA20.length;             // 20
+const SMA_PERIOD     = RULES.indicators.SMA200.length;           // 200
+const LEVERAGE       = RULES.position_sizing.leverage;           // 5
+const RISK_PCT       = RULES.position_sizing.risk_pct;           // 0.01
+const MAX_MARGIN     = RULES.position_sizing.max_margin;         // 500
+const MAX_OPEN       = RULES.limits.max_open_positions;          // 20
+const MAX_DAILY      = RULES.limits.max_trades_per_day;          // 500
+const ORDER_DELAY_MS = RULES.limits.api_delay_ms;                // 500ms — after order placement only
+const FETCH_DELAY_MS = RULES.limits.fetch_delay_ms || 200;       // 200ms — between candle fetches
+const SCAN_MS        = RULES.limits.scan_interval_ms;            // 5000
+const EXIT_POLL_MS   = RULES.limits.exit_poll_ms || 5000;        // 5000
+const MIN_BODY_PCT   = 0.0002;
+const STOP_LOSS_PCT  = RULES.limits.stop_loss_pct || 0.03;
+const BLACKLIST      = new Set(RULES.blacklist || []);
+const WATCHLIST      = (RULES.watchlist || []).filter(s => !BLACKLIST.has(s));
+const PORT           = process.env.PORT || 3000;
+
+// Candle duration in ms — used for freshness check
+const CANDLE_MS = {
+  "1m": 60_000, "3m": 180_000, "5m": 300_000,
+  "15m": 900_000, "30m": 1_800_000, "1h": 3_600_000, "4h": 14_400_000
+}[TIMEFRAME] ?? 60_000;
 
 // ── Credentials ────────────────────────────────────────────────────────────────
 function creds() {
@@ -140,6 +147,12 @@ function checkEntry(candles) {
 
   const curr = candles[candles.length - 2];   // last CLOSED bar
   const prev = candles[candles.length - 3];   // bar before last closed
+
+  // ── FRESHNESS GUARD — skip signals older than 2 candle durations ────────────
+  // curr.time = candle OPEN time; candle CLOSE time = curr.time + CANDLE_MS
+  // If more than 2 bars have passed since curr closed, the signal is stale.
+  const signalAge = bingxNow() - (curr.time + CANDLE_MS);
+  if (signalAge > CANDLE_MS * 2) return null;  // too old — at least 2 bars have formed since
 
   // ── MA over CLOSED bars only (exclude the forming bar at -1) ───────────────
   const cc = candles.slice(0, -1).map(c => c.close);   // closed closes
@@ -344,23 +357,32 @@ async function scanEntry() {
 
     log(`═ ENTRY SCAN | bal=${bal.toFixed(2)} | open=${positions.length}/${MAX_OPEN} | today=${tradeToday}/${MAX_DAILY}`);
 
-    let signals  = 0;
+    let signals   = 0;
     let openCount = positions.length;  // track running total mid-scan
     for (const sym of WATCHLIST) {
       if (busy.has(sym))           continue;
       if (tradeToday >= MAX_DAILY) break;
-      if (openCount  >= MAX_OPEN)  break;  // enforce cap mid-scan
+      if (openCount  >= MAX_OPEN)  break;
 
-      await new Promise(r => setTimeout(r, API_DELAY_MS));
-
+      // Fetch candles FIRST (no pre-delay) — check signal immediately
       const cv  = await getCandles(sym);
+      // Small inter-fetch delay (public API rate limit: 200ms = ~5 req/s, well within limits)
+      await new Promise(r => setTimeout(r, FETCH_DELAY_MS));
+
       const sig = checkEntry(cv);
       if (!sig) continue;
 
       signals++;
-      log(`📊 SIGNAL ${sig.padEnd(5)} ${sym}`);
+      const candleAge = Math.round((bingxNow() - (cv[cv.length - 2]?.time + CANDLE_MS)) / 1000);
+      log(`📊 SIGNAL ${sig.padEnd(5)} ${sym.padEnd(18)} | candle age: ${candleAge}s`);
+
       const placed = await placeEntry(sym, sig, bal);
-      if (placed) { openCount++; busy.add(sym); }
+      if (placed) {
+        openCount++;
+        busy.add(sym);
+        // Larger delay only after placing an order (private API)
+        await new Promise(r => setTimeout(r, ORDER_DELAY_MS));
+      }
     }
 
     if (signals > 0) log(`═ ENTRY SCAN DONE | signals=${signals} | trades_today=${tradeToday}`);
@@ -428,18 +450,20 @@ async function pollExits() {
       if (pnlPct !== null && pnlPct <= -STOP_LOSS_PCT) {
         log(`🛑 STOP LOSS  ${side.padEnd(5)} ${sym.padEnd(18)} | PnL: ${(pnlPct * 100).toFixed(2)}% | $${(pnlUsd ?? 0).toFixed(2)} [${pnlSource}] → CLOSING NOW`);
         await placeExit(sym, side, qty, entry);
-        await new Promise(r => setTimeout(r, API_DELAY_MS));
+        await new Promise(r => setTimeout(r, ORDER_DELAY_MS));
         continue;
       }
 
-      // ── STEP 2: MA20 crossover check ──────────────────────────────────────────
+      // ── STEP 2: MA20 crossover check (candle close signal) ───────────────────
       const cv = await getCandles(sym);
+      await new Promise(r => setTimeout(r, FETCH_DELAY_MS));  // rate-limit candle fetch
       if (!cv.length) continue;
       if (!checkExit(cv, side)) continue;
 
-      log(`🔔 EXIT SIGNAL ${side.padEnd(5)} ${sym} — MA20 crossover`);
+      const candleAge = Math.round((bingxNow() - (cv[cv.length - 2]?.time + CANDLE_MS)) / 1000);
+      log(`🔔 EXIT SIGNAL ${side.padEnd(5)} ${sym.padEnd(18)} — MA20 crossover | candle age: ${candleAge}s`);
       await placeExit(sym, side, qty, entry);
-      await new Promise(r => setTimeout(r, API_DELAY_MS));
+      await new Promise(r => setTimeout(r, ORDER_DELAY_MS));
     }
   } catch (e) {
     log(`EXIT POLL ERROR: ${e.message}`);
@@ -484,7 +508,8 @@ log(`   Leverage   : ${LEVERAGE}x  |  Risk       : ${RISK_PCT * 100}%  |  Max ma
 log(`   Watchlist  : ${WATCHLIST.length} symbols (${BLACKLIST.size} blacklisted)`);
 log(`   Entry scan : every ${SCAN_MS / 1000}s  |  Exit poll : every ${EXIT_POLL_MS / 1000}s`);
 log(`   Stop-loss  : -${STOP_LOSS_PCT * 100}% unrealized PnL (live price, IMMEDIATE)`);
-log(`   Limits     : ${MAX_OPEN} open positions | ${MAX_DAILY} trades/day | ${API_DELAY_MS}ms API delay`);
+log(`   Timing     : scan=${SCAN_MS/1000}s | exit=${EXIT_POLL_MS/1000}s | fetch_delay=${FETCH_DELAY_MS}ms | order_delay=${ORDER_DELAY_MS}ms | candle=${CANDLE_MS/1000}s`);
+log(`   Limits     : ${MAX_OPEN} open positions | ${MAX_DAILY} trades/day | stop=${STOP_LOSS_PCT*100}% PnL`);
 
 await scanEntry();
 setInterval(scanEntry, SCAN_MS);
