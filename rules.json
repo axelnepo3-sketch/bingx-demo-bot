@@ -1,6 +1,6 @@
 {
   "strategy_name":            "MA SWING TRADER",
-  "version":                  "3.8",
+  "version":                  "3.9",
   "timeframe":                "1m",
   "timeframe_htf":            "5m",
 
@@ -63,15 +63,11 @@
   },
 
   "exit": {
-    "priority_order": "1=stop_loss | 2=take_profit | 3=trailing_stop | 4=MA20_crossover",
+    "priority_order": "1=stop_loss | 2=take_profit | 3=trailing_stop",
     "stop_loss":      "-3% unrealized PnL — all positions (trend + reversal unified)",
     "take_profit":    "+8% swing target (2.67:1 R:R)",
     "trailing_stop":  "activates at +4%, trails 2% below peak",
-    "ma20_crossover": {
-      "long":  "curr.close < MA20 AND prev.close >= prevMA20",
-      "short": "curr.close > MA20 AND prev.close <= prevMA20",
-      "note":  "No freshness guard — exits always fire"
-    },
+    "ma20_crossover": "REMOVED in v3.9 — caused premature exits at < -1% PnL before stop-loss fired",
     "order_type":       "MARKET",
     "double_exit_guard":"closingPositions Set prevents race condition"
   },
@@ -218,6 +214,7 @@
   },
 
   "changelog": {
+    "v3.9": "MA20 crossover exit removed entirely. Exits are now stop-loss (-3%) → take-profit (+8%) → trailing-stop (+4%/−2%) only. Eliminates premature closes at < -1% PnL. pollExits simplified from 2-pass to single-pass; checkExit function removed.",
     "v3.8": "Trend indicator changed: SMA200 → SMA30. MA20 vs SMA30 now determines long/short bias (shorter-term, more responsive crossovers). Candle fetch limit drops from 204 to 34 (faster API). trendGap threshold adjusted 0.5%→0.2% to reflect MA20/SMA30 proximity.",
     "v3.7": "HF AI Edition: auto-watchlist top-100 BingX USDT-perp (boot+midnight refresh), market regime detection (BTC 5m ATR+slope → BULL/BEAR/RANGING/VOLATILE), regime-based sizing, major-coin correlation cap (max 5), portfolio heat logging, 10 scan workers, ATR function, high/low in candles. Bundles v3.6.",
     "v3.6": "Reversal vol 2×→1× (any vol≥avg qualifies), reversal stop -1.5%→-3% (unified with trend)",

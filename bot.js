@@ -1,5 +1,5 @@
 /**
- * BingX Demo Trading Bot — MA Swing Trader v3.8 (Hedge Fund AI Edition)
+ * BingX Demo Trading Bot — MA Swing Trader v3.9 (Hedge Fund AI Edition)
  * Target: $200/day | $50,000/year
  *
  * ═══════════════════════════════════════════════════════════════════════════
@@ -395,20 +395,7 @@ function checkEntry(candles1m, candles5m = null) {
   return { signal, score, distPct, bodyPct, rsi: rsiVal, ma20, sma30, isReversal, volRatio, mtfConfirmed, mtfTag };
 }
 
-// ── Exit signal ────────────────────────────────────────────────────────────────
-function checkExit(candles, side) {
-  if (candles.length < SMA_PERIOD + 3) return false;
-  const cc       = candles.slice(0, -1).map(c => c.close);
-  const ccPrev   = cc.slice(0, -1);
-  const currClose = cc[cc.length - 1];
-  const prevClose = ccPrev[ccPrev.length - 1];
-  const currMA    = sma(cc,     MA_PERIOD);
-  const prevMA    = sma(ccPrev, MA_PERIOD);
-  if (!currMA || !prevMA) return false;
-  if (side === "LONG")  return currClose < currMA && prevClose >= prevMA;
-  if (side === "SHORT") return currClose > currMA && prevClose <= prevMA;
-  return false;
-}
+// checkExit (MA20-crossover) removed in v3.9 — exits are stop-loss / take-profit / trailing-stop only
 
 // ── Market data ────────────────────────────────────────────────────────────────
 async function getCandles(symbol, interval = TIMEFRAME, limit = SMA_PERIOD + 4) {
@@ -799,7 +786,9 @@ async function scanEntry(reason = "interval") {
   }
 }
 
-// ── Exit monitor — 2-pass ─────────────────────────────────────────────────────
+// ── Exit monitor — single-pass (stop-loss → take-profit → trailing-stop) ──────
+// MA20 crossover exit removed in v3.9 — positions ride until a PnL exit fires.
+// Priority: 1=stop-loss | 2=take-profit | 3=trailing-stop
 let polling = false;
 async function pollExits() {
   if (polling) return;
@@ -811,17 +800,13 @@ async function pollExits() {
     const positions = await getOpenPositions();
     if (!positions.length) return;
 
-    const needsMACheck = [];
-
-    // ── PASS 1: Stop / Take-profit / Trailing-stop (no extra API) ─────────
     for (const pos of positions) {
       const sym   = pos.symbol;
       const side  = pos.positionSide;
       const qty   = parseFloat(pos.positionAmt || 0);
       const entry = parseFloat(pos.avgPrice    || pos.entryPrice || 0);
 
-      if (!qty || !["LONG", "SHORT"].includes(side)) continue;
-      if (!entry) continue;
+      if (!qty || !["LONG", "SHORT"].includes(side) || !entry) continue;
 
       const posKey = `${sym}-${side}`;
       if (closingPositions.has(posKey)) continue;
@@ -830,25 +815,32 @@ async function pollExits() {
       const stopPct = isRev ? REVERSAL_STOP_PCT : STOP_LOSS_PCT;
       const revTag  = isRev ? " ⚡REV" : "";
 
+      // ── Method A: BingX unrealized PnL fields (no extra API call) ────────
+      let pnlPct = null, pnlUsd = null, cachedLp = 0;
       const bxPnl    = parseFloat(pos.unrealizedProfit ?? "NaN");
       const bxMargin = parseFloat(pos.initialMargin    ?? pos.margin ?? "NaN");
 
-      if (!isFinite(bxPnl) || !isFinite(bxMargin) || bxMargin <= 0) {
-        needsMACheck.push({ pos, pnlPct: null, pnlUsd: null, isRev, revTag });
-        continue;
+      if (isFinite(bxPnl) && isFinite(bxMargin) && bxMargin > 0) {
+        pnlPct = bxPnl / bxMargin;
+        pnlUsd = bxPnl;
+      } else {
+        // ── Method B fallback: live price delta ─────────────────────────────
+        cachedLp = await getLivePrice(sym);
+        if (!cachedLp) continue;
+        const pp   = side === "LONG" ? (cachedLp - entry)/entry : (entry - cachedLp)/entry;
+        const margin = Math.min(Math.abs(qty) * entry / LEVERAGE, MAX_MARGIN);
+        pnlPct = pp * LEVERAGE;
+        pnlUsd = pp * margin * LEVERAGE;
       }
 
-      const pnlPct = bxPnl / bxMargin;
-      const pnlUsd = bxPnl;
-
+      // ── Update trailing-stop peak ─────────────────────────────────────────
       const prevPeak = peakPnl.get(posKey) ?? -Infinity;
       if (pnlPct > prevPeak) peakPnl.set(posKey, pnlPct);
       const peak = peakPnl.get(posKey);
 
-      let fired = false;
-
+      // ── 1. Stop-loss ──────────────────────────────────────────────────────
       if (pnlPct <= -stopPct) {
-        const lp = await getLivePrice(sym);
+        const lp = cachedLp || await getLivePrice(sym);
         log(`🛑 STOP-LOSS${revTag}  ${side.padEnd(5)} ${sym.padEnd(18)} PnL:${(pnlPct*100).toFixed(2)}% $${pnlUsd.toFixed(2)} stop=${stopPct*100}%`);
         closingPositions.add(posKey);
         const ok = await placeExit(sym, side, qty, entry, `stop-loss${isRev?"-rev":""}`, lp);
@@ -858,95 +850,25 @@ async function pollExits() {
           log(`⏸  COOLDOWN SET ${sym} — ${COOLDOWN_MS/60000}min block after stop-loss`);
         }
         await new Promise(r => setTimeout(r, ORDER_DELAY_MS));
-        fired = true;
+
+      // ── 2. Take-profit ────────────────────────────────────────────────────
       } else if (pnlPct >= TAKE_PROFIT_PCT) {
-        const lp = await getLivePrice(sym);
+        const lp = cachedLp || await getLivePrice(sym);
         log(`🎯 TAKE-PROFIT${revTag} ${side.padEnd(5)} ${sym.padEnd(18)} PnL:${(pnlPct*100).toFixed(2)}% $${pnlUsd.toFixed(2)}`);
         closingPositions.add(posKey);
         const ok = await placeExit(sym, side, qty, entry, `take-profit${isRev?"-rev":""}`, lp);
         if (ok) exitsFired++;
         await new Promise(r => setTimeout(r, ORDER_DELAY_MS));
-        fired = true;
+
+      // ── 3. Trailing-stop ──────────────────────────────────────────────────
       } else if (peak >= TRAIL_ON_PCT && pnlPct <= peak - TRAIL_DIST_PCT) {
-        const lp = await getLivePrice(sym);
+        const lp = cachedLp || await getLivePrice(sym);
         log(`📉 TRAIL-STOP${revTag}  ${side.padEnd(5)} ${sym.padEnd(18)} peak:${(peak*100).toFixed(2)}% now:${(pnlPct*100).toFixed(2)}%`);
         closingPositions.add(posKey);
         const ok = await placeExit(sym, side, qty, entry, `trail-stop${isRev?"-rev":""}`, lp);
         if (ok) exitsFired++;
         await new Promise(r => setTimeout(r, ORDER_DELAY_MS));
-        fired = true;
       }
-
-      if (!fired) needsMACheck.push({ pos, pnlPct, pnlUsd, isRev, revTag });
-    }
-
-    if (!needsMACheck.length) return;
-
-    // ── PASS 2: MA20 crossover — parallel candle fetch ─────────────────────
-    const maSymbols = needsMACheck.map(x => x.pos.symbol);
-    const candleMap = await fetchCandlesBatch(maSymbols, TIMEFRAME, SMA_PERIOD + 4);
-
-    for (const { pos, pnlPct, isRev, revTag } of needsMACheck) {
-      const sym    = pos.symbol;
-      const side   = pos.positionSide;
-      const qty    = parseFloat(pos.positionAmt || 0);
-      const entry  = parseFloat(pos.avgPrice    || pos.entryPrice || 0);
-      const posKey = `${sym}-${side}`;
-
-      if (closingPositions.has(posKey)) continue;
-
-      const cv = candleMap.get(sym) || [];
-
-      // Method B fallback for missing BingX PnL fields
-      if (pnlPct === null && cv.length) {
-        const lp = await getLivePrice(sym);
-        if (lp > 0) {
-          const pp       = side === "LONG" ? (lp - entry)/entry : (entry - lp)/entry;
-          const pnlPctB  = pp * LEVERAGE;
-          const margin   = Math.min(Math.abs(qty) * entry / LEVERAGE, MAX_MARGIN);
-          const stopPctB = isRev ? REVERSAL_STOP_PCT : STOP_LOSS_PCT;
-          const prevPeak = peakPnl.get(posKey) ?? -Infinity;
-          if (pnlPctB > prevPeak) peakPnl.set(posKey, pnlPctB);
-          const peak = peakPnl.get(posKey);
-
-          if (pnlPctB <= -stopPctB) {
-            log(`🛑 STOP-LOSS${revTag}  ${side.padEnd(5)} ${sym.padEnd(18)} PnL:${(pnlPctB*100).toFixed(2)}% [live]`);
-            closingPositions.add(posKey);
-            const ok = await placeExit(sym, side, qty, entry, `stop-loss${isRev?"-rev":""}`, lp);
-            if (ok) { exitsFired++; stopCooldowns.set(sym, Date.now() + COOLDOWN_MS); }
-            await new Promise(r => setTimeout(r, ORDER_DELAY_MS));
-            continue;
-          }
-          if (pnlPctB >= TAKE_PROFIT_PCT) {
-            log(`🎯 TAKE-PROFIT${revTag} ${side.padEnd(5)} ${sym.padEnd(18)} PnL:${(pnlPctB*100).toFixed(2)}% [live]`);
-            closingPositions.add(posKey);
-            const ok = await placeExit(sym, side, qty, entry, `take-profit${isRev?"-rev":""}`, lp);
-            if (ok) exitsFired++;
-            await new Promise(r => setTimeout(r, ORDER_DELAY_MS));
-            continue;
-          }
-          if (peak >= TRAIL_ON_PCT && pnlPctB <= peak - TRAIL_DIST_PCT) {
-            log(`📉 TRAIL-STOP${revTag}  ${side.padEnd(5)} ${sym.padEnd(18)} peak:${(peak*100).toFixed(2)}% now:${(pnlPctB*100).toFixed(2)}% [live]`);
-            closingPositions.add(posKey);
-            const ok = await placeExit(sym, side, qty, entry, `trail-stop${isRev?"-rev":""}`, lp);
-            if (ok) exitsFired++;
-            await new Promise(r => setTimeout(r, ORDER_DELAY_MS));
-            continue;
-          }
-        }
-      }
-
-      if (!cv.length || !checkExit(cv, side)) continue;
-
-      const lastBar = cv[cv.length - 2];
-      const age     = Math.round((bingxNow() - (lastBar.time + CANDLE_MS)) / 1000);
-      const pnlStr  = pnlPct !== null ? `${(pnlPct*100).toFixed(2)}%` : "n/a";
-      log(`🔔 EXIT${revTag}  ${side.padEnd(5)} ${sym.padEnd(18)} [MA20-cross] PnL:${pnlStr} | age:${age}s`);
-      closingPositions.add(posKey);
-      const lp = await getLivePrice(sym);
-      const ok  = await placeExit(sym, side, qty, entry, `MA20-cross${isRev?"-rev":""}`, lp);
-      if (ok) exitsFired++;
-      await new Promise(r => setTimeout(r, ORDER_DELAY_MS));
     }
   } catch (e) {
     log(`EXIT POLL ERROR: ${e.message}`);
