@@ -1,6 +1,6 @@
 {
   "strategy_name":            "MA SCALPER",
-  "version":                  "2.1",
+  "version":                  "3.0",
   "timeframe":                "1m",
   "watchlist": [
     "BTC-USDT",  "ETH-USDT",  "SOL-USDT",  "BSB-USDT",   "HYPE-USDT",
@@ -107,6 +107,19 @@
   "targets": {
     "daily_profit_usdt":  200,
     "yearly_profit_usdt": 50000
+  },
+
+  "risk_management": {
+    "stop_loss_pct":             0.03,
+    "take_profit_pct":           0.06,
+    "trail_activate_pct":        0.03,
+    "trail_distance_pct":        0.02,
+    "daily_profit_target_usdt":  200,
+    "daily_loss_limit_usdt":     100,
+    "win_rate_min":              0.40,
+    "win_rate_min_trades":       10,
+    "win_rate_pause_minutes":    30,
+    "description":               "2:1 R:R | Take profit +6% | Trail activates +3% trailing 2% | Daily cap $200 profit / $100 loss | Circuit breaker: pause 30min if WR < 40% after 10+ trades"
   },
 
   "session": {
