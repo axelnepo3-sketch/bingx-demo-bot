@@ -1,6 +1,6 @@
 {
   "strategy_name":            "MA SCALPER",
-  "version":                  "3.2",
+  "version":                  "3.3",
   "timeframe":                "1m",
   "watchlist": [
     "BTC-USDT",  "ETH-USDT",  "SOL-USDT",  "BSB-USDT",   "HYPE-USDT",
@@ -131,6 +131,7 @@
     "short_in_long_bias":  "MA20 > SMA200 (long  trend) + RED  candle + prev GREEN + close ≤ MA20 + within 0.5% + RSI>30 + vol ≥ 2x avg → SHORT",
     "volume_multiplier": 2.0,
     "volume_period":     20,
+    "volume_baseline":   "20-bar avg computed over CLOSED bars PRIOR to curr (excludes forming bar AND curr bar — curr bar excluded to prevent self-inflating the baseline)",
     "size_multiplier":   0.50,
     "stop_loss_pct":     0.015,
     "note":              "Reversal entries use 50% normal size and -1.5% stop (tighter) vs trend entries at full size and -3% stop"
@@ -181,7 +182,15 @@
     "purpose":    "Minimize Railway log bloat while retaining all actionable info"
   },
 
+  "performance": {
+    "scan_latency":     "~4s per full watchlist scan (5 concurrent workers vs ~20s serial)",
+    "entry_latency":    "5–8s after candle close (down from 30s+ in v3.2)",
+    "exit_poll_passes": "2-pass: Pass1=stop/TP/trail from position data (0 extra API calls), Pass2=parallel MA20 fetch for crossover check only",
+    "livePrice_calls":  "on-demand only — fetched once when a stop/TP/trail exit condition is actually met (not on every position every poll)"
+  },
+
   "changelog": {
+    "v3.3": "5-bug audit: volAvg excludes curr bar (slice(0,-2) — fixes deflated volume ratio), fetchCandlesBatch 5 concurrent workers (scan 20s→4s, entry latency 30s+→5-8s), 2-pass pollExits (Pass1=no-API stop/TP/trail, Pass2=parallel MA20), livePrice on-demand only (not every poll), getCandles 1-retry with 300ms wait",
     "v3.2": "Counter-trend reversal entries: LONG in short-bias + SHORT in long-bias, gated by ≥2x volume surge. 50% size, -1.5% stop, reversalPositions tracker, volume field added to candles",
     "v3.1": "8-bug fix: dynamic qty precision, double-exit guard, livePrice for method A, checkDailyReset in pollExits, TDZ cleanup, removed dead DAILY_LOSS_LIM, MAX_DAILY log, closingPositions daily clear",
     "v3.0": "Hedge fund edition: take-profit +6%, trailing stop +3%/−2%, circuit breaker, RSI filter, signal scoring, daily target tracking",
