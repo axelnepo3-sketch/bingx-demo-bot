@@ -1,5 +1,5 @@
 /**
- * BingX Demo Trading Bot — MA20 Scalper v3.3 (Hedge Fund Edition)
+ * BingX Demo Trading Bot — MA20 Scalper v3.4 (Hedge Fund Edition)
  * Target: $200/day | $50,000/year
  *
  * TWO entry modes per scan:
@@ -22,6 +22,11 @@
  *   • Signal quality scoring → position size 50% / 75% / 100% (trend only)
  *   • $200/day target — tracked only, NEVER halts trading
  *   • Bot runs 24/7 — no daily loss limit, no entry cap
+ *
+ * v3.4 fix:
+ *   6. Slot-fill scan: whenever any exit fires, trigger a fresh scanEntry() 1.5s
+ *      later so freed slots are filled almost immediately (was waiting up to 5s)
+ *      scanEntry receives a reason tag ("interval" | "slot-fill") for clear logging
  *
  * v3.3 bug fixes:
  *   1. volAvg excludes curr bar (was inflating denominator, ratio was understated)
@@ -154,10 +159,11 @@ function log(msg) {
 }
 
 // ── Shared state ───────────────────────────────────────────────────────────────
-const peakPnl           = new Map();
-const closingPositions  = new Set();
-const reversalPositions = new Set();
+const peakPnl           = new Map();   // peak PnL per position (trailing stop)
+const closingPositions  = new Set();   // in-flight closes (prevent double-exit)
+const reversalPositions = new Set();   // counter-trend positions (-1.5% stop)
 let   winRatePauseUntil = 0;
+let   fillScanTimer     = null;        // FIX #6: scheduled slot-fill scan after exit
 
 // ── Daily reset ────────────────────────────────────────────────────────────────
 let tradeToday = 0;
@@ -491,10 +497,25 @@ async function placeExit(symbol, positionSide, qty, entryPrice, reason, knownPri
   }
 }
 
+// ── FIX #6: Slot-fill scan ─────────────────────────────────────────────────────
+// After any exit closes a position, trigger a fresh entry scan ~1.5s later.
+// The 1.5s delay gives BingX time to process the close order before we call
+// getOpenPositions() again. Built-in `scanning` guard prevents overlap.
+// Only one fill scan is ever queued at a time — clearTimeout de-dupes.
+function scheduleFillScan() {
+  if (fillScanTimer) clearTimeout(fillScanTimer);
+  fillScanTimer = setTimeout(() => {
+    fillScanTimer = null;
+    scanEntry("slot-fill");   // forward declaration OK — JS hoists the function
+  }, 1500);
+}
+
 // ── Entry scan — Stage 1: parallel fetch | Stage 2: process signals ────────────
 // FIX #2: parallel fetch drops total scan time from ~20s to ~4s
+// reason = "interval"  → triggered by setInterval (normal 5s cadence)
+//        = "slot-fill" → triggered by scheduleFillScan() after an exit
 let scanning = false;
-async function scanEntry() {
+async function scanEntry(reason = "interval") {
   if (scanning) return;
   scanning = true;
   try {
@@ -518,11 +539,13 @@ async function scanEntry() {
     const toCheck = WATCHLIST.filter(s => !busy.has(s));
     if (!toCheck.length) return;
 
-    let openCount = positions.length;
-    let signals   = 0;
-    const total   = perf.wins + perf.losses;
-    const wr      = total ? `${((perf.wins / total) * 100).toFixed(1)}%` : "n/a";
-    log(`═ SCAN | bal=$${bal.toFixed(2)} | open=${openCount}/${MAX_OPEN} | checking=${toCheck.length} | today=${tradeToday} | PnL:$${perf.dailyPnl.toFixed(2)}/$${DAILY_TARGET} | WR:${wr}`);
+    let openCount  = positions.length;
+    const slots    = MAX_OPEN - openCount;
+    let signals    = 0;
+    const total    = perf.wins + perf.losses;
+    const wr       = total ? `${((perf.wins / total) * 100).toFixed(1)}%` : "n/a";
+    const scanTag  = reason === "slot-fill" ? "🔄 SLOT-FILL" : "═ SCAN";
+    log(`${scanTag} [${slots} slot${slots !== 1 ? "s" : ""} free] | bal=$${bal.toFixed(2)} | open=${openCount}/${MAX_OPEN} | checking=${toCheck.length} | today=${tradeToday} | PnL:$${perf.dailyPnl.toFixed(2)}/$${DAILY_TARGET} | WR:${wr}`);
 
     // ── Stage 1: fetch all candles in parallel ─────────────────────────────
     const scanStart  = Date.now();
@@ -580,11 +603,13 @@ async function scanEntry() {
 //
 //  FIX #3: eliminates serial candle fetch (was 20 × 700ms = 14s per poll)
 //  FIX #4: livePrice not fetched unless exit condition is met
+//  FIX #6: after any exit fires, scheduleFillScan() queues a slot-fill scan ~1.5s later
 //
 let polling = false;
 async function pollExits() {
   if (polling) return;
   polling = true;
+  let exitsFired = 0;   // FIX #6: count exits so we know whether to schedule fill scan
   try {
     checkDailyReset();
 
@@ -635,21 +660,24 @@ async function pollExits() {
         const lp = await getLivePrice(sym);
         log(`🛑 STOP-LOSS${revTag}  ${side.padEnd(5)} ${sym.padEnd(18)} PnL:${(pnlPct*100).toFixed(2)}% $${pnlUsd.toFixed(2)} stop=${stopPct*100}%`);
         closingPositions.add(posKey);
-        await placeExit(sym, side, qty, entry, `stop-loss${isRev?"-rev":""}`, lp);
+        const ok = await placeExit(sym, side, qty, entry, `stop-loss${isRev?"-rev":""}`, lp);
+        if (ok) exitsFired++;
         await new Promise(r => setTimeout(r, ORDER_DELAY_MS));
         fired = true;
       } else if (pnlPct >= TAKE_PROFIT_PCT) {
         const lp = await getLivePrice(sym);
         log(`🎯 TAKE-PROFIT${revTag} ${side.padEnd(5)} ${sym.padEnd(18)} PnL:${(pnlPct*100).toFixed(2)}% $${pnlUsd.toFixed(2)}`);
         closingPositions.add(posKey);
-        await placeExit(sym, side, qty, entry, `take-profit${isRev?"-rev":""}`, lp);
+        const ok = await placeExit(sym, side, qty, entry, `take-profit${isRev?"-rev":""}`, lp);
+        if (ok) exitsFired++;
         await new Promise(r => setTimeout(r, ORDER_DELAY_MS));
         fired = true;
       } else if (peak >= TRAIL_ON_PCT && pnlPct <= peak - TRAIL_DIST_PCT) {
         const lp = await getLivePrice(sym);
         log(`📉 TRAIL-STOP${revTag}  ${side.padEnd(5)} ${sym.padEnd(18)} peak:${(peak*100).toFixed(2)}% now:${(pnlPct*100).toFixed(2)}%`);
         closingPositions.add(posKey);
-        await placeExit(sym, side, qty, entry, `trail-stop${isRev?"-rev":""}`, lp);
+        const ok = await placeExit(sym, side, qty, entry, `trail-stop${isRev?"-rev":""}`, lp);
+        if (ok) exitsFired++;
         await new Promise(r => setTimeout(r, ORDER_DELAY_MS));
         fired = true;
       }
@@ -690,21 +718,24 @@ async function pollExits() {
           if (pnlPctB <= -stopPctB) {
             log(`🛑 STOP-LOSS${revTag}  ${side.padEnd(5)} ${sym.padEnd(18)} PnL:${(pnlPctB*100).toFixed(2)}% [live]`);
             closingPositions.add(posKey);
-            await placeExit(sym, side, qty, entry, `stop-loss${isRev?"-rev":""}`, lp);
+            const ok = await placeExit(sym, side, qty, entry, `stop-loss${isRev?"-rev":""}`, lp);
+            if (ok) exitsFired++;
             await new Promise(r => setTimeout(r, ORDER_DELAY_MS));
             continue;
           }
           if (pnlPctB >= TAKE_PROFIT_PCT) {
             log(`🎯 TAKE-PROFIT${revTag} ${side.padEnd(5)} ${sym.padEnd(18)} PnL:${(pnlPctB*100).toFixed(2)}% [live]`);
             closingPositions.add(posKey);
-            await placeExit(sym, side, qty, entry, `take-profit${isRev?"-rev":""}`, lp);
+            const ok = await placeExit(sym, side, qty, entry, `take-profit${isRev?"-rev":""}`, lp);
+            if (ok) exitsFired++;
             await new Promise(r => setTimeout(r, ORDER_DELAY_MS));
             continue;
           }
           if (peak >= TRAIL_ON_PCT && pnlPctB <= peak - TRAIL_DIST_PCT) {
             log(`📉 TRAIL-STOP${revTag}  ${side.padEnd(5)} ${sym.padEnd(18)} peak:${(peak*100).toFixed(2)}% now:${(pnlPctB*100).toFixed(2)}% [live]`);
             closingPositions.add(posKey);
-            await placeExit(sym, side, qty, entry, `trail-stop${isRev?"-rev":""}`, lp);
+            const ok = await placeExit(sym, side, qty, entry, `trail-stop${isRev?"-rev":""}`, lp);
+            if (ok) exitsFired++;
             await new Promise(r => setTimeout(r, ORDER_DELAY_MS));
             continue;
           }
@@ -720,12 +751,18 @@ async function pollExits() {
       log(`🔔 EXIT${revTag}  ${side.padEnd(5)} ${sym.padEnd(18)} [MA20-cross] PnL:${pnlStr} | age:${age}s`);
       closingPositions.add(posKey);
       const lp = await getLivePrice(sym);
-      await placeExit(sym, side, qty, entry, `MA20-cross${isRev?"-rev":""}`, lp);
+      const ok  = await placeExit(sym, side, qty, entry, `MA20-cross${isRev?"-rev":""}`, lp);
+      if (ok) exitsFired++;
       await new Promise(r => setTimeout(r, ORDER_DELAY_MS));
     }
   } catch (e) {
     log(`EXIT POLL ERROR: ${e.message}`);
   } finally {
+    // FIX #6: if any position closed, schedule an immediate slot-fill scan
+    if (exitsFired > 0) {
+      log(`🔄 ${exitsFired} slot${exitsFired !== 1 ? "s" : ""} freed — slot-fill scan in 1.5s`);
+      scheduleFillScan();
+    }
     polling = false;
   }
 }
@@ -777,7 +814,8 @@ http.createServer((req, res) => {
     performance: {
       scanConcurrency:   `${CANDLE_CONCURRENCY} parallel workers`,
       entryLatency:      `~4s fetch + signal check (was ~20s serial)`,
-      exitLatency:       "pass1: instant (position data) | pass2: parallel MA fetch"
+      exitLatency:       "pass1: instant (position data) | pass2: parallel MA fetch",
+      slotFill:          "immediate — slot-fill scan fires 1.5s after any exit"
     },
     config: {
       timeframe: TIMEFRAME, leverage: `${LEVERAGE}x`,
@@ -802,6 +840,7 @@ log(`   Circuit brk  : WR < ${WR_MIN*100}% (min ${WR_MIN_TRADES} trades) → pau
 log(`   Watchlist    : ${WATCHLIST.length} symbols | ${BLACKLIST.size} blacklisted`);
 log(`   Scan speed   : ${CANDLE_CONCURRENCY} concurrent workers | fetch≤4s | entry latency ~5–8s after close`);
 log(`   Exit speed   : pass1 instant (position data) | pass2 parallel MA20 fetch`);
+log(`   Slot fill    : immediate — slot-fill scan triggers 1.5s after any exit closes a position`);
 
 await scanEntry();
 setInterval(scanEntry, SCAN_MS);
