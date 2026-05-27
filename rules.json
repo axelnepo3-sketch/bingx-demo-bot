@@ -20,7 +20,7 @@
   "watchlist_last_updated":   "auto — refreshed on boot and every midnight UTC",
   "watchlist_refresh":        "on_boot + daily_midnight_utc",
 
-  "blacklist": ["ETHFI-USDT", "DYM-USDT", "SUI-USDT", "WLD-USDT", "10000NAT-USDT", "LAB-USDT", "BSB-USDT"],
+  "blacklist": ["ETHFI-USDT", "DYM-USDT", "SUI-USDT", "WLD-USDT", "10000NAT-USDT", "LAB-USDT", "BSB-USDT", "RUSSEL200-USDT"],
 
   "indicators": {
     "MA20":    { "type": "SMA", "length": 20, "source": "close", "timeframe": "1m" },
