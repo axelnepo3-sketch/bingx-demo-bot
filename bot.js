@@ -156,12 +156,19 @@ function checkEntry(candles) {
   // BingX should return ms, but guard against seconds (value < year-2000 in ms)
   const candleTime = curr.time < 1_000_000_000_000 ? curr.time * 1000 : curr.time;
 
-  // ── FRESHNESS GUARD (entries only) ─────────────────────────────────────────
-  // Only enter within 1.5 candle durations of the signal candle closing.
-  // On 1m: max 90s. Prevents chasing moves from old bars.
+  // ── FRESHNESS GUARD — MAX 2 CANDLE CLOSES AFTER SIGNAL ────────────────────
+  // Signal candle (N) closes → valid entry window opens.
+  // Entry allowed on 1st close (N+1) or 2nd close (N+2) after the signal.
+  // Once the 3rd candle opens (age >= 2 × CANDLE_MS) → INVALID, no entry.
+  //
+  //   T=0            T=CANDLE_MS    T=CANDLE_MS×2
+  //   Signal closes  1st close      2nd close  → HARD CUTOFF
+  //   |─────── valid ────────────────|
+  //
+  // On 1m: valid window = 0–120s. Age ≥ 120s = SKIP.
   const signalAge = bingxNow() - (candleTime + CANDLE_MS);
-  if (signalAge < 0)               return null;  // candle hasn't closed yet
-  if (signalAge > CANDLE_MS * 1.5) return null;  // too stale
+  if (signalAge < 0)                return null;  // signal candle hasn't closed yet
+  if (signalAge >= CANDLE_MS * 2)   return null;  // 2+ candles already closed → INVALID
 
   // ── MA over CLOSED bars only ────────────────────────────────────────────────
   const cc     = candles.slice(0, -1).map(c => c.close);

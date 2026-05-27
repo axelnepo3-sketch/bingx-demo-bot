@@ -45,9 +45,9 @@
     "short": "SHORT: RED candle + prev GREEN + close BELOW MA20 + within 0.5% of MA20 + MA20 < SMA200 + signal fresh within 1.5 bars",
     "order_type":          "MARKET — fills immediately at best available price",
     "max_ma_distance_pct": 0.005,
-    "freshness_candles":   1.5,
+    "freshness_candles":   2,
     "logic": {
-      "step1_freshness": "Signal candle closed within 1.5x candle duration — no stale entries",
+      "step1_freshness": "Max 2 candle closes after signal — entry valid on 1st or 2nd close only. 3rd close onwards = INVALID",
       "step2_bias":      "MA20 > SMA200 → LONG only | MA20 < SMA200 → SHORT only | equal → skip",
       "step3_body":      "|close - open| / open >= 0.0002 (0.02% min body)",
       "step4_reversal":  "curr GREEN + prev RED for LONG | curr RED + prev GREEN for SHORT",
