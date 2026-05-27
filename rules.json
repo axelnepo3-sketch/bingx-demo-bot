@@ -58,18 +58,26 @@
   },
 
   "exit": {
-    "long":       "Close LONG: curr.close < MA20 AND prev.close >= prevMA20 (crossed below) + fresh within 1.5 bars",
-    "short":      "Close SHORT: curr.close > MA20 AND prev.close <= prevMA20 (crossed above) + fresh within 1.5 bars",
-    "stop_loss":  "-3% unrealized PnL on margin — hard stop, live price, checked every 5s",
-    "order_type": "MARKET — fills immediately at best available price",
+    "priority_order": "1=stop_loss | 2=take_profit | 3=trailing_stop | 4=MA20_crossover",
+    "stop_loss":      "-3% unrealized PnL on margin — hard stop, checked every 5s, MARKET order",
+    "take_profit":    "+6% unrealized PnL on margin — hard lock, 2:1 R:R, MARKET order",
+    "trailing_stop":  "activates at +3% PnL, trails 2% below peak — locks in gains, MARKET order",
+    "ma20_crossover": {
+      "long":  "Close LONG: curr.close < MA20 AND prev.close >= prevMA20 (crossed below MA20)",
+      "short": "Close SHORT: curr.close > MA20 AND prev.close <= prevMA20 (crossed above MA20)",
+      "note":  "NO freshness guard — exits always fire regardless of candle age"
+    },
+    "order_type":    "MARKET — fills immediately at best available price",
+    "double_exit_guard": "closingPositions Set prevents re-sending close order while one is in-flight",
     "logic": {
       "check_interval":  "Every 5 seconds",
-      "freshness":       "Exit signal candle must be within 1.5 candle durations — no acting on stale crossovers",
+      "freshness":       "NONE on exits — exits must never be blocked by age",
       "ma_consistency":  "currMA and prevMA both computed from closed bars at their respective positions",
-      "stop_priority":   "Stop-loss checked FIRST (BingX unrealizedProfit/initialMargin), then MA crossover",
-      "stop_formula":    "pnlPct = unrealizedProfit / initialMargin (or priceDelta/entry * leverage fallback)",
+      "pnl_method_A":    "BingX unrealizedProfit / initialMargin (primary — most accurate)",
+      "pnl_method_B":    "livePrice delta * leverage (fallback when BingX fields unavailable)",
+      "stop_formula":    "pnlPct = unrealizedProfit / initialMargin — compared to -0.03 / +0.06",
       "tracking":        "Logs: price%, margin PnL%, USD PnL, daily total, W/L ratio",
-      "purpose":         "Clean MA crossover exits — timely, fresh-signal only, with hard stop protection"
+      "purpose":         "Priority exits: stop → take-profit → trail → MA20. Never block an exit."
     }
   },
 
@@ -88,8 +96,15 @@
     "max_margin":   500.00,
     "leverage":     5,
     "min_notional": 5.00,
-    "qty_formula":  "floor((min(balance * 0.01, 500) * 5) / price, 1 decimal)",
-    "description":  "Risk 1% of balance per trade, max $500 margin, 5x leverage"
+    "qty_formula":  "floor((min(balance * 0.01, 500) * 5) / price, dynamic_decimals)",
+    "qty_precision": {
+      "price_gte_10000": "4 decimal places (BTC-range: qty=0.0050)",
+      "price_gte_1000":  "3 decimal places (ETH-range: qty=0.200)",
+      "price_gte_10":    "2 decimal places (SOL-range: qty=3.33)",
+      "price_gte_1":     "1 decimal place  (NEAR-range: qty=50.0)",
+      "price_lt_1":      "0 decimal places (DOGE-range: qty=2500)"
+    },
+    "description":  "Risk 1% of balance per trade, max $500 margin, 5x leverage, dynamic qty precision"
   },
 
   "limits": {
@@ -101,7 +116,7 @@
     "scan_interval_ms":    5000,
     "exit_poll_ms":        5000,
     "stop_loss_pct":       0.03,
-    "description":         "Max 20 open, 500/day | fetch:200ms between symbols | order:500ms after placement | scan/exit:5s | stop:-3% PnL"
+    "description":         "Max 20 open, 500/day | fetch:200ms between symbols | order:500ms after placement | scan/exit:5s | stop:-3% TP:+6% trail:+3%→-2%"
   },
 
   "targets": {
@@ -150,7 +165,14 @@
   },
 
   "debug": {
-    "log_level":  "critical events only (entries, exits, stop-losses, scan summaries)",
+    "log_level":  "critical events only (entries, exits, stop-losses, take-profits, trail-stops, scan summaries)",
     "purpose":    "Minimize Railway log bloat while retaining all actionable info"
+  },
+
+  "changelog": {
+    "v3.1": "8-bug fix: dynamic qty precision, double-exit guard, livePrice for method A, checkDailyReset in pollExits, TDZ cleanup, removed dead DAILY_LOSS_LIM, MAX_DAILY log, closingPositions daily clear",
+    "v3.0": "Hedge fund edition: take-profit +6%, trailing stop +3%/−2%, circuit breaker, RSI filter, signal scoring, daily target tracking",
+    "v2.1": "2-candle freshness window, MA20 proximity 0.5%, SMA200 bias, blacklist additions",
+    "v2.0": "SMA200 trend bias, stop-loss on margin PnL, inverted signal fix, late entry fix"
   }
 }
