@@ -48,7 +48,7 @@
   "exit": {
     "long":  "MA20 crossover: current close < MA20 AND previous close >= MA20 (IMMEDIATELY on signal)",
     "short": "MA20 crossover: current close > MA20 AND previous close <= MA20 (IMMEDIATELY on signal)",
-    "stop_loss": "1.5% unrealized loss from entry — hard stop, checked every 10 seconds",
+    "stop_loss": "3% unrealized PnL loss from entry — hard stop, checked every 10 seconds with LIVE price",
     "order_type": "MARKET — fills immediately at best available price",
     "logic": {
       "check_interval":   "Every 10 seconds",
@@ -87,8 +87,8 @@
     "one_trade_per_symbol": true,
     "api_delay_ms":       1000,
     "scan_interval_ms":   10000,
-    "stop_loss_pct":      0.015,
-    "description":        "Max 20 open, 500 trades/day, 1000ms delay, 1.5% stop-loss (BingX compliance)"
+    "stop_loss_pct":      0.03,
+    "description":        "Max 20 open, 500 trades/day, 1000ms delay, 3% unrealized PnL stop-loss"
   },
 
   "targets": {

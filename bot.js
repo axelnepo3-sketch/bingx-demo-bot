@@ -344,6 +344,9 @@ async function scanEntry() {
 }
 
 // ── Exit monitor (every EXIT_POLL_MS = 10s, independent loop) ─────────────────
+// Priority order per position:
+//   1. LIVE price stop-loss check first  (-3% unrealized PnL → IMMEDIATE exit)
+//   2. MA20 crossover check via candles  (only if stop-loss not triggered)
 let polling = false;
 async function pollExits() {
   if (polling) return;
@@ -359,22 +362,28 @@ async function pollExits() {
       const entry = parseFloat(pos.avgPrice     || pos.entryPrice || 0);
 
       if (!qty || !["LONG", "SHORT"].includes(side)) continue;
+      if (!entry) continue;
 
+      // ── STEP 1: STOP-LOSS via LIVE price (fast, no candle fetch needed) ──────
+      const livePrice = await getLivePrice(sym);
+      if (livePrice > 0) {
+        const unrealizedPct = side === "LONG"
+          ? (livePrice - entry) / entry
+          : (entry - livePrice) / entry;
+
+        if (unrealizedPct <= -STOP_LOSS_PCT) {
+          const margin = Math.min(Math.abs(qty) * entry / LEVERAGE, MAX_MARGIN);
+          const pnlUsd = unrealizedPct * margin * LEVERAGE;
+          log(`🛑 STOP LOSS  ${side.padEnd(5)} ${sym} — ${(unrealizedPct * 100).toFixed(3)}% | ~$${pnlUsd.toFixed(2)} | livePrice=${livePrice}`);
+          await placeExit(sym, side, qty, entry);
+          await new Promise(r => setTimeout(r, API_DELAY_MS));
+          continue;  // skip MA20 check for this position
+        }
+      }
+
+      // ── STEP 2: MA20 crossover check (requires candle history) ───────────────
       const cv = await getCandles(sym);
       if (!cv.length) continue;
-
-      // Stop-loss: exit if unrealized move >= 1.5% against position
-      const curPrice      = cv[cv.length - 1].close;
-      const unrealizedPct = side === "LONG"
-        ? (curPrice - entry) / entry
-        : (entry - curPrice) / entry;
-
-      if (unrealizedPct <= -STOP_LOSS_PCT) {
-        log(`🛑 STOP LOSS ${side.padEnd(5)} ${sym} — unrealized ${(unrealizedPct * 100).toFixed(3)}%`);
-        await placeExit(sym, side, qty, entry);
-        await new Promise(r => setTimeout(r, API_DELAY_MS));
-        continue;
-      }
 
       if (!checkExit(cv, side)) continue;
 
@@ -424,6 +433,7 @@ log(`   Bias       : LONG only when MA20>SMA200 | SHORT only when MA20<SMA200`);
 log(`   Leverage   : ${LEVERAGE}x  |  Risk       : ${RISK_PCT * 100}%  |  Max margin : $${MAX_MARGIN}`);
 log(`   Watchlist  : ${WATCHLIST.length} symbols (${BLACKLIST.size} blacklisted)`);
 log(`   Entry scan : every ${SCAN_MS / 1000}s  |  Exit poll : every ${EXIT_POLL_MS / 1000}s`);
+log(`   Stop-loss  : -${STOP_LOSS_PCT * 100}% unrealized PnL (live price, IMMEDIATE)`);
 log(`   Limits     : ${MAX_OPEN} open positions | ${MAX_DAILY} trades/day | ${API_DELAY_MS}ms API delay`);
 
 await scanEntry();
