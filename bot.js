@@ -1,15 +1,30 @@
 /**
- * BingX Demo Trading Bot — MA20 Scalper v3.0 (Hedge Fund Edition)
+ * BingX Demo Trading Bot — MA20 Scalper v3.1 (Hedge Fund Edition)
  * Target: $200/day | $50,000/year
  *
- * Professional risk management:
- *   • Take profit  +6% PnL on margin  (2:1 R:R vs -3% stop)
+ * Strategy:
+ *   • LONG : GREEN candle + prev RED  + close ≥ MA20 + within 0.5% + MA20>SMA200 + RSI<70
+ *   • SHORT: RED candle  + prev GREEN + close ≤ MA20 + within 0.5% + MA20<SMA200 + RSI>30
+ *   • Entry valid on 1st or 2nd candle close only (2-candle freshness window)
+ *
+ * Risk management:
+ *   • Stop-loss     -3%  PnL on margin  (hard, checked every 5s)
+ *   • Take-profit   +6%  PnL on margin  (2:1 R:R, locks gain)
  *   • Trailing stop activates at +3%, trails 2% below peak
- *   • Daily profit target $200 — tracked/displayed only, NEVER halts trading
+ *   • $200/day target — tracked & displayed, NEVER halts trading
  *   • Win-rate circuit breaker: pause 30 min if WR < 40% (min 10 trades)
  *   • Signal quality scoring → position size 50% / 75% / 100%
- *   • RSI filter: no LONG if RSI ≥ 70, no SHORT if RSI ≤ 30
- *   • Bot runs 24/7 — no daily loss limit, no profit cap on entries
+ *   • Bot trades 24/7 — no daily loss limit, no entry cap
+ *
+ * Bug fixes in v3.1:
+ *   1. calcQty precision: dynamic decimal places by price tier (BTC no longer skipped)
+ *   2. Double-exit guard: closingPositions Set prevents re-closing in-flight exits
+ *   3. livePrice fetched when method A used → accurate stop/TP/trail log prices
+ *   4. checkDailyReset() called in pollExits → peakPnl cleared at midnight
+ *   5. peakPnl + winRatePauseUntil declared before checkDailyReset (no TDZ risk)
+ *   6. Removed dead DAILY_LOSS_LIM variable
+ *   7. MAX_DAILY hit now logs a message
+ *   8. closingPositions cleared on confirmed close
  */
 
 import axios from "axios";
@@ -52,7 +67,6 @@ const TAKE_PROFIT_PCT = rm.take_profit_pct         || 0.06;   // +6% PnL on marg
 const TRAIL_ON_PCT    = rm.trail_activate_pct      || 0.03;   // start trailing at +3%
 const TRAIL_DIST_PCT  = rm.trail_distance_pct      || 0.02;   // trail 2% below peak
 const DAILY_TARGET    = rm.daily_profit_target_usdt || 200;
-const DAILY_LOSS_LIM  = rm.daily_loss_limit_usdt   || 100;
 const WR_MIN          = rm.win_rate_min             || 0.40;   // 40% min win rate
 const WR_MIN_TRADES   = rm.win_rate_min_trades      || 10;     // trigger after 10+ trades
 const WR_PAUSE_MS     = (rm.win_rate_pause_minutes  || 30) * 60_000;
@@ -125,6 +139,11 @@ function log(msg) {
   if (stats.log.length > 1000) stats.log.shift();
 }
 
+// ── FIX #5/6: Declare shared state BEFORE the functions that use them ──────────
+const peakPnl          = new Map();   // `${symbol}-${side}` → highest pnlPct seen (trailing stop)
+const closingPositions = new Set();   // FIX #2: positions with in-flight close orders
+let   winRatePauseUntil = 0;
+
 // ── Daily reset ────────────────────────────────────────────────────────────────
 let tradeToday = 0;
 let tradeDate  = new Date().toISOString().slice(0, 10);
@@ -132,31 +151,28 @@ let tradeDate  = new Date().toISOString().slice(0, 10);
 function checkDailyReset() {
   const today = new Date().toISOString().slice(0, 10);
   if (today !== tradeDate) {
-    tradeDate     = today;
-    tradeToday    = 0;
-    perf.dailyPnl = 0;
-    perf.wins     = 0;   // reset daily win/loss for win-rate circuit breaker
-    perf.losses   = 0;
-    winRatePauseUntil = 0;
+    tradeDate          = today;
+    tradeToday         = 0;
+    perf.dailyPnl      = 0;
+    perf.wins          = 0;
+    perf.losses        = 0;
+    winRatePauseUntil  = 0;
     peakPnl.clear();
+    closingPositions.clear();
     log(`📅 Daily reset — all counters cleared`);
   }
 }
 
-// ── Circuit breaker state ──────────────────────────────────────────────────────
-let winRatePauseUntil = 0;
-
+// ── Circuit breaker ────────────────────────────────────────────────────────────
 function checkCircuitBreaker() {
   const total = perf.wins + perf.losses;
-  if (total < WR_MIN_TRADES) return false;  // not enough data yet
+  if (total < WR_MIN_TRADES) return false;
 
   const wr = perf.wins / total;
-  if (wr >= WR_MIN) return false;  // win rate OK
+  if (wr >= WR_MIN) return false;
 
-  // Win rate too low — check if already paused
-  if (Date.now() < winRatePauseUntil) return true;  // still in pause
+  if (Date.now() < winRatePauseUntil) return true;
 
-  // Set new pause
   winRatePauseUntil = Date.now() + WR_PAUSE_MS;
   log(`⚠️  CIRCUIT BREAKER — Win rate ${(wr * 100).toFixed(1)}% < ${WR_MIN * 100}% after ${total} trades → pausing ${WR_PAUSE_MS / 60000}min`);
   return true;
@@ -182,24 +198,18 @@ function rsi(closes, period = RSI_PERIOD) {
   return 100 - (100 / (1 + avgG / avgL));
 }
 
-// ── Signal quality score (1–8) → position size multiplier ─────────────────────
-//   Grades each signal on 3 axes.  Higher score = more conviction = larger size.
-//
-//   Proximity to MA20: tighter = better setup
-//   Candle body strength: larger body = stronger momentum
-//   Trend strength (MA20 vs SMA200 gap): wider gap = cleaner trend
-//
+// ── Signal quality score (3–8) → position size multiplier ─────────────────────
 function signalScore(distPct, bodyPct, ma20, sma200) {
   let s = 0;
-  // Proximity (0-3 pts)
+  // Proximity to MA20 (1-3 pts)
   if (distPct < 0.001)      s += 3;
   else if (distPct < 0.003) s += 2;
   else                      s += 1;
-  // Body strength (0-3 pts)
+  // Candle body strength (1-3 pts)
   if (bodyPct > 0.002)      s += 3;
   else if (bodyPct > 0.001) s += 2;
   else                      s += 1;
-  // Trend gap (0-2 pts)
+  // Trend gap MA20 vs SMA200 (1-2 pts)
   const trendGap = sma200 > 0 ? Math.abs(ma20 - sma200) / sma200 : 0;
   if (trendGap > 0.005)     s += 2;
   else                      s += 1;
@@ -209,47 +219,44 @@ function signalScore(distPct, bodyPct, ma20, sma200) {
 function sizeMultiplier(score) {
   if (score >= 7) return 1.00;   // A+ signal → full size
   if (score >= 5) return 0.75;   // B  signal → 75%
-  return 0.50;                   // C  signal → 50% (minimum)
+  return 0.50;                   // C  signal → 50%
 }
 
 // ── Entry signal ───────────────────────────────────────────────────────────────
-//
-//  LONG:  GREEN candle + prev RED  + close >= MA20 (≤0.5% away) + MA20>SMA200 + RSI<70
-//  SHORT: RED candle  + prev GREEN + close <= MA20 (≤0.5% away) + MA20<SMA200 + RSI>30
-//
-//  Returns { signal, score, distPct, bodyPct, ma20, sma200 } or null
-//
+//  LONG:  GREEN candle + prev RED  + close ≥ MA20 (≤0.5% away) + MA20>SMA200 + RSI<70
+//  SHORT: RED candle  + prev GREEN + close ≤ MA20 (≤0.5% away) + MA20<SMA200 + RSI>30
+//  Returns { signal, score, distPct, bodyPct, rsi, ma20, sma200 } or null
 function checkEntry(candles) {
   if (candles.length < SMA_PERIOD + 3) return null;
 
   const curr = candles[candles.length - 2];   // last CLOSED bar
-  const prev = candles[candles.length - 3];
+  const prev = candles[candles.length - 3];   // bar before last closed
 
-  // Time unit safety (BingX should give ms; guard against seconds)
+  // Time unit safety (BingX returns ms; guard against seconds)
   const candleTime = curr.time < 1_000_000_000_000 ? curr.time * 1000 : curr.time;
 
-  // Freshness: max 2 candle closes after signal
+  // Freshness: max 2 candle closes after signal candle close
   const signalAge = bingxNow() - (candleTime + CANDLE_MS);
-  if (signalAge < 0)              return null;
-  if (signalAge >= CANDLE_MS * 2) return null;
+  if (signalAge < 0)              return null;  // candle close still in the future
+  if (signalAge >= CANDLE_MS * 2) return null;  // 3rd+ candle has closed → stale
 
-  // Indicators — closed bars only
+  // Indicators — closed bars only (forming bar excluded via slice(0,-1))
   const cc     = candles.slice(0, -1).map(c => c.close);
   const ma20   = sma(cc, MA_PERIOD);
   const sma200 = sma(cc, SMA_PERIOD);
   const rsiVal = rsi(cc);
   if (!ma20 || !sma200) return null;
 
-  // Trend bias
+  // Trend bias filter (MA20 vs SMA200)
   const bullish = ma20 > sma200;
   const bearish = ma20 < sma200;
-  if (!bullish && !bearish) return null;
+  if (!bullish && !bearish) return null;  // MA20 == SMA200 → neutral, skip
 
-  // Body size
+  // Minimum candle body (0.02% to filter doji/noise)
   const bodyPct = Math.abs(curr.close - curr.open) / curr.open;
   if (bodyPct < MIN_BODY_PCT) return null;
 
-  // MA20 proximity
+  // MA20 proximity — entry must be within 0.5% of MA20 (no chasing)
   const distPct = Math.abs(curr.close - ma20) / ma20;
   if (distPct > MAX_MA_DIST_PCT) return null;
 
@@ -258,7 +265,7 @@ function checkEntry(candles) {
   const prevRed   = prev.close < prev.open;
   const prevGreen = prev.close > prev.open;
 
-  // RSI filter — avoid overbought LONGs, avoid oversold SHORTs
+  // RSI filter — skip overbought LONGs and oversold SHORTs
   const rsiOK_long  = !rsiVal || rsiVal < 70;
   const rsiOK_short = !rsiVal || rsiVal > 30;
 
@@ -271,8 +278,7 @@ function checkEntry(candles) {
   return { signal, score, distPct, bodyPct, rsi: rsiVal, ma20, sma200 };
 }
 
-// ── Exit signal (MA20 crossover) ───────────────────────────────────────────────
-// NO freshness guard — exits must never be blocked.
+// ── Exit signal (MA20 crossover only — no freshness guard, exits must always fire) ──
 function checkExit(candles, side) {
   if (candles.length < SMA_PERIOD + 3) return false;
 
@@ -328,12 +334,30 @@ async function getLivePrice(symbol) {
   } catch { return 0; }
 }
 
-// ── Position sizing (with quality multiplier) ──────────────────────────────────
+// ── FIX #1: Position sizing — dynamic decimal precision by price tier ──────────
+//  OLD: Math.floor(x * 10) / 10  →  1 decimal  →  BTC@$100k gives qty=0 (SKIPPED)
+//  NEW: precision scales with price so every symbol gets a valid, tradable qty
 function calcQty(bal, price, multiplier = 1.0) {
   if (!bal || !price) return 0;
   const margin   = Math.min(bal * RISK_PCT, MAX_MARGIN) * multiplier;
   const notional = margin * LEVERAGE;
-  return Math.floor((notional / price) * 10) / 10;
+  const rawQty   = notional / price;
+
+  //  Price tier  →  decimals   Example
+  //  ≥ $10,000   →  4          BTC $100k: qty=0.0050 ✓  (was 0 ✗)
+  //  ≥ $1,000    →  3          ETH  $2.5k: qty=0.200 ✓
+  //  ≥ $10       →  2          SOL   $150: qty=3.33  ✓
+  //  ≥ $1        →  1          NEAR    $5: qty=50.0  ✓
+  //  < $1        →  0          DOGE $0.20: qty=2500  ✓
+  let decimals;
+  if      (price >= 10_000) decimals = 4;
+  else if (price >=  1_000) decimals = 3;
+  else if (price >=     10) decimals = 2;
+  else if (price >=      1) decimals = 1;
+  else                      decimals = 0;
+
+  const factor = 10 ** decimals;
+  return Math.floor(rawQty * factor) / factor;
 }
 
 // ── Place entry ────────────────────────────────────────────────────────────────
@@ -353,6 +377,7 @@ async function placeEntry(symbol, signal, score, bal) {
     const side         = signal === "LONG" ? "BUY" : "SELL";
     const positionSide = signal;
 
+    // Set leverage (ignore failure — may already be set)
     try { await POST("/openApi/swap/v2/trade/leverage", { symbol, side: signal, leverage: LEVERAGE }); } catch {}
 
     const r = await POST("/openApi/swap/v2/trade/order", {
@@ -378,6 +403,7 @@ async function placeEntry(symbol, signal, score, bal) {
 // ── Place exit ─────────────────────────────────────────────────────────────────
 async function placeExit(symbol, positionSide, qty, entryPrice, reason, knownPrice = 0) {
   try {
+    // FIX #3: always resolve a real exit price for accurate PnL logging
     const exitPrice = knownPrice || await getLivePrice(symbol);
     if (!exitPrice) { log(`SKIP EXIT ${symbol} — no live price`); return false; }
 
@@ -391,8 +417,8 @@ async function placeExit(symbol, positionSide, qty, entryPrice, reason, knownPri
       const pricePct = positionSide === "LONG"
         ? (exitPrice - entryPrice) / entryPrice
         : (entryPrice - exitPrice) / entryPrice;
-      const pnl      = pricePct * margin * LEVERAGE;
-      const pnlPct   = pricePct * LEVERAGE * 100;
+      const pnl    = pricePct * margin * LEVERAGE;
+      const pnlPct = pricePct * LEVERAGE * 100;
 
       perf.dailyPnl += pnl;
       if (pnl >= 0) perf.wins++; else perf.losses++;
@@ -401,19 +427,23 @@ async function placeExit(symbol, positionSide, qty, entryPrice, reason, knownPri
       const wr    = total ? ((perf.wins / total) * 100).toFixed(1) : "0.0";
       const icon  = pnl >= 0 ? "✅" : "❌";
 
-      // Clean up trailing stop tracker
+      // FIX #2: remove from in-flight set on confirmed close
       peakPnl.delete(`${symbol}-${positionSide}`);
+      closingPositions.delete(`${symbol}-${positionSide}`);
 
       stats.lastExit = new Date().toISOString();
       log(`${icon} EXIT  ${positionSide.padEnd(5)} ${symbol.padEnd(18)} [${reason}] price:${(pricePct*100).toFixed(3)}% margin:${pnlPct.toFixed(2)}% | PnL:$${pnl.toFixed(2)} | Daily:$${perf.dailyPnl.toFixed(2)} | W/L:${perf.wins}/${perf.losses}(${wr}%)`);
       return true;
     } else {
       log(`❌ EXIT FAIL   ${symbol} [${reason}] code=${r?.code} msg=${r?.msg}`);
+      // FIX #2: remove from in-flight set on failure too (allow retry)
+      closingPositions.delete(`${symbol}-${positionSide}`);
       return false;
     }
   } catch (e) {
     stats.errors++;
     log(`❌ EXIT ERROR  ${symbol}: ${e.message}`);
+    closingPositions.delete(`${symbol}-${positionSide}`);  // FIX #2: allow retry
     return false;
   }
 }
@@ -427,12 +457,16 @@ async function scanEntry() {
     checkDailyReset();
     stats.lastScan = new Date().toISOString();
 
-    // ── WIN-RATE CIRCUIT BREAKER ───────────────────────────────────────────────
     if (checkCircuitBreaker()) return;
 
     const positions = await getOpenPositions();
     if (positions.length >= MAX_OPEN) return;
-    if (tradeToday >= MAX_DAILY) return;
+
+    // FIX #8: log when daily trade limit reached
+    if (tradeToday >= MAX_DAILY) {
+      log(`⏸  Daily trade limit ${MAX_DAILY} reached — no new entries until midnight reset`);
+      return;
+    }
 
     let bal = await getBalance();
     if (bal <= 0) { log(`⏸  Balance=0, skipping scan`); return; }
@@ -443,7 +477,7 @@ async function scanEntry() {
 
     const total = perf.wins + perf.losses;
     const wr    = total ? `${((perf.wins / total) * 100).toFixed(1)}%` : "n/a";
-    log(`═ SCAN | bal=$${bal.toFixed(2)} | open=${openCount}/${MAX_OPEN} | today=${tradeToday} | dailyPnL:$${perf.dailyPnl.toFixed(2)} | WR:${wr}`);
+    log(`═ SCAN | bal=$${bal.toFixed(2)} | open=${openCount}/${MAX_OPEN} | today=${tradeToday} | dailyPnL:$${perf.dailyPnl.toFixed(2)}/$${DAILY_TARGET} | WR:${wr}`);
 
     for (const sym of WATCHLIST) {
       if (busy.has(sym))           continue;
@@ -468,7 +502,7 @@ async function scanEntry() {
       if (placed) {
         openCount++;
         busy.add(sym);
-        bal = await getBalance();  // refresh after each trade
+        bal = await getBalance();  // refresh balance after each placed trade
         await new Promise(r => setTimeout(r, ORDER_DELAY_MS));
       }
     }
@@ -482,22 +516,22 @@ async function scanEntry() {
   }
 }
 
-// ── Peak PnL tracker (for trailing stop) ──────────────────────────────────────
-const peakPnl = new Map();   // key: `${symbol}-${side}`, value: highest pnlPct seen
-
 // ── Exit monitor ───────────────────────────────────────────────────────────────
 //
 //  Per position, priority order:
-//    1. Hard stop-loss     -3%  PnL on margin  → close immediately
-//    2. Hard take-profit   +6%  PnL on margin  → close immediately (lock 2:1 R:R)
-//    3. Trailing stop      +3%  activate, -2% trail from peak
-//    4. MA20 crossover     strategy signal
+//    1. Hard stop-loss    -3%  PnL on margin  → close immediately
+//    2. Hard take-profit  +6%  PnL on margin  → close immediately (2:1 R:R)
+//    3. Trailing stop     +3%  activate, trail 2% from peak
+//    4. MA20 crossover    strategy signal
 //
 let polling = false;
 async function pollExits() {
   if (polling) return;
   polling = true;
   try {
+    // FIX #4: ensure peakPnl cleared at midnight even if no scan is running
+    checkDailyReset();
+
     const positions = await getOpenPositions();
     if (!positions.length) return;
 
@@ -512,75 +546,85 @@ async function pollExits() {
 
       const posKey = `${sym}-${side}`;
 
-      // ── COMPUTE CURRENT PnL ────────────────────────────────────────────────
+      // FIX #2: skip positions with in-flight close orders (prevent double-exit)
+      if (closingPositions.has(posKey)) continue;
+
+      // ── COMPUTE CURRENT PnL ─────────────────────────────────────────────────
       let pnlPct    = null;
       let pnlUsd    = null;
       let pnlSource = "";
       let livePrice = 0;
 
-      // Method A: BingX fields (most accurate)
+      // Method A: BingX unrealizedProfit / initialMargin (most accurate)
       const bxPnl    = parseFloat(pos.unrealizedProfit ?? "NaN");
       const bxMargin = parseFloat(pos.initialMargin    ?? pos.margin ?? "NaN");
       if (isFinite(bxPnl) && isFinite(bxMargin) && bxMargin > 0) {
         pnlPct    = bxPnl / bxMargin;
         pnlUsd    = bxPnl;
         pnlSource = "bingx";
+
+        // FIX #3: fetch live price when method A is used so stop/TP/trail logs are accurate
+        livePrice = await getLivePrice(sym);
       }
 
-      // Method B: live price × leverage
+      // Method B: live price × leverage (fallback when BingX fields unavailable)
       if (pnlPct === null) {
         livePrice = await getLivePrice(sym);
         if (livePrice > 0) {
-          const pp      = side === "LONG" ? (livePrice - entry) / entry : (entry - livePrice) / entry;
-          pnlPct        = pp * LEVERAGE;
-          const margin  = Math.min(Math.abs(qty) * entry / LEVERAGE, MAX_MARGIN);
-          pnlUsd        = pp * margin * LEVERAGE;
-          pnlSource     = "live";
+          const pp     = side === "LONG" ? (livePrice - entry) / entry : (entry - livePrice) / entry;
+          pnlPct       = pp * LEVERAGE;
+          const margin = Math.min(Math.abs(qty) * entry / LEVERAGE, MAX_MARGIN);
+          pnlUsd       = pp * margin * LEVERAGE;
+          pnlSource    = "live";
         }
       }
 
       if (pnlPct === null) {
-        // Can't determine PnL — fetch candles only for MA check
+        // Can't compute PnL — fall back to MA crossover check only
         const cv = await getCandles(sym);
         await new Promise(r => setTimeout(r, FETCH_DELAY_MS));
         if (cv.length && checkExit(cv, side)) {
-          log(`🔔 EXIT  ${side.padEnd(5)} ${sym.padEnd(18)} [MA20-cross]`);
+          log(`🔔 EXIT  ${side.padEnd(5)} ${sym.padEnd(18)} [MA20-cross] PnL:unknown`);
+          closingPositions.add(posKey);  // FIX #2: mark in-flight
           await placeExit(sym, side, qty, entry, "MA20-cross");
           await new Promise(r => setTimeout(r, ORDER_DELAY_MS));
         }
         continue;
       }
 
-      // Update peak PnL for trailing stop
+      // Track peak PnL for trailing stop
       const prevPeak = peakPnl.get(posKey) ?? -Infinity;
       if (pnlPct > prevPeak) peakPnl.set(posKey, pnlPct);
       const peak = peakPnl.get(posKey);
 
-      // ── 1. HARD STOP-LOSS ─────────────────────────────────────────────────
+      // ── 1. HARD STOP-LOSS ──────────────────────────────────────────────────
       if (pnlPct <= -STOP_LOSS_PCT) {
         log(`🛑 STOP-LOSS   ${side.padEnd(5)} ${sym.padEnd(18)} PnL:${(pnlPct*100).toFixed(2)}% $${(pnlUsd??0).toFixed(2)} [${pnlSource}]`);
+        closingPositions.add(posKey);  // FIX #2: mark in-flight
         await placeExit(sym, side, qty, entry, "stop-loss", livePrice);
         await new Promise(r => setTimeout(r, ORDER_DELAY_MS));
         continue;
       }
 
-      // ── 2. HARD TAKE-PROFIT ───────────────────────────────────────────────
+      // ── 2. HARD TAKE-PROFIT ────────────────────────────────────────────────
       if (pnlPct >= TAKE_PROFIT_PCT) {
         log(`🎯 TAKE-PROFIT ${side.padEnd(5)} ${sym.padEnd(18)} PnL:${(pnlPct*100).toFixed(2)}% $${(pnlUsd??0).toFixed(2)}`);
+        closingPositions.add(posKey);  // FIX #2: mark in-flight
         await placeExit(sym, side, qty, entry, "take-profit", livePrice);
         await new Promise(r => setTimeout(r, ORDER_DELAY_MS));
         continue;
       }
 
-      // ── 3. TRAILING STOP ─────────────────────────────────────────────────
+      // ── 3. TRAILING STOP ───────────────────────────────────────────────────
       if (peak >= TRAIL_ON_PCT && pnlPct <= peak - TRAIL_DIST_PCT) {
         log(`📉 TRAIL-STOP  ${side.padEnd(5)} ${sym.padEnd(18)} peak:${(peak*100).toFixed(2)}% now:${(pnlPct*100).toFixed(2)}%`);
+        closingPositions.add(posKey);  // FIX #2: mark in-flight
         await placeExit(sym, side, qty, entry, "trail-stop", livePrice);
         await new Promise(r => setTimeout(r, ORDER_DELAY_MS));
         continue;
       }
 
-      // ── 4. MA20 CROSSOVER ─────────────────────────────────────────────────
+      // ── 4. MA20 CROSSOVER ──────────────────────────────────────────────────
       const cv = await getCandles(sym);
       await new Promise(r => setTimeout(r, FETCH_DELAY_MS));
       if (!cv.length) continue;
@@ -589,6 +633,7 @@ async function pollExits() {
       const lastBar = cv[cv.length - 2];
       const age     = Math.round((bingxNow() - (lastBar.time + CANDLE_MS)) / 1000);
       log(`🔔 EXIT  ${side.padEnd(5)} ${sym.padEnd(18)} [MA20-cross] PnL:${(pnlPct*100).toFixed(2)}% | age:${age}s`);
+      closingPositions.add(posKey);  // FIX #2: mark in-flight
       await placeExit(sym, side, qty, entry, "MA20-cross", livePrice);
       await new Promise(r => setTimeout(r, ORDER_DELAY_MS));
     }
@@ -608,13 +653,14 @@ http.createServer((req, res) => {
   }
   const total    = perf.wins + perf.losses;
   const winRatio = total ? `${((perf.wins / total) * 100).toFixed(1)}%` : "0%";
+  const progress = `${perf.dailyPnl.toFixed(2)} / $${DAILY_TARGET} (${((perf.dailyPnl / DAILY_TARGET) * 100).toFixed(1)}%)`;
   const paused   = winRatePauseUntil > Date.now()
     ? `circuit breaker — resumes in ${Math.ceil((winRatePauseUntil - Date.now()) / 60000)}min`
     : null;
 
   res.writeHead(200, { "Content-Type": "application/json" });
   res.end(JSON.stringify({
-    status:    paused ? `⚠️ ${paused}` : "🟢 running",
+    status:    paused ? `⚠️ ${paused}` : "🟢 running 24/7",
     strategy:  `${RULES.strategy_name} v${RULES.version} | MA${MA_PERIOD}/SMA${SMA_PERIOD}/RSI${RSI_PERIOD} | ${TIMEFRAME}`,
     uptime:    Math.round(process.uptime()) + "s",
     trades:    stats.trades,
@@ -626,16 +672,15 @@ http.createServer((req, res) => {
       wins:          perf.wins,
       losses:        perf.losses,
       winRatio,
-      dailyPnl:      `$${perf.dailyPnl.toFixed(2)}`,
-      dailyTarget:   `$${DAILY_TARGET}`,
-      dailyProgress: total ? `${((perf.dailyPnl / DAILY_TARGET) * 100).toFixed(1)}%` : "0%"
+      dailyPnl:      `$${progress}`,
+      note:          "Target is informational — bot never halts on profit"
     },
     riskManagement: {
-      stopLoss:      `-${STOP_LOSS_PCT * 100}% margin`,
-      takeProfit:    `+${TAKE_PROFIT_PCT * 100}% margin`,
-      trailActivate: `+${TRAIL_ON_PCT * 100}% margin`,
-      trailDistance: `${TRAIL_DIST_PCT * 100}% from peak`,
-      dailyTarget:   `$${DAILY_TARGET} (tracking only — no halt)`,
+      stopLoss:       `-${STOP_LOSS_PCT * 100}% margin`,
+      takeProfit:     `+${TAKE_PROFIT_PCT * 100}% margin`,
+      trailActivate:  `+${TRAIL_ON_PCT * 100}% margin`,
+      trailDistance:  `${TRAIL_DIST_PCT * 100}% from peak`,
+      dailyTarget:    `$${DAILY_TARGET} (tracking only — no halt)`,
       circuitBreaker: paused || "inactive"
     },
     config: {
@@ -645,6 +690,7 @@ http.createServer((req, res) => {
       maxMargin:  `$${MAX_MARGIN}`,
       maxMaDist:  `${MAX_MA_DIST_PCT * 100}%`,
       watchlist:  WATCHLIST.length,
+      blacklist:  BLACKLIST.size,
       scan:       `${SCAN_MS / 1000}s`,
       exit:       `${EXIT_POLL_MS / 1000}s`
     }
@@ -654,15 +700,15 @@ http.createServer((req, res) => {
 // ── Boot ───────────────────────────────────────────────────────────────────────
 await syncClock();
 log(`🏦 ${RULES.strategy_name} v${RULES.version} — HEDGE FUND EDITION`);
-log(`   Target     : $${DAILY_TARGET}/day | $${RULES.targets?.yearly_profit_usdt?.toLocaleString()}/year`);
-log(`   Timeframe  : ${TIMEFRAME} | MA${MA_PERIOD} | SMA${SMA_PERIOD} | RSI${RSI_PERIOD}`);
-log(`   Entry      : within ${MAX_MA_DIST_PCT*100}% of MA20 | 2-candle window | RSI filter | scored`);
-log(`   Stop-loss  : -${STOP_LOSS_PCT*100}%  Take-profit: +${TAKE_PROFIT_PCT*100}%  (R:R ${TAKE_PROFIT_PCT/STOP_LOSS_PCT}:1)`);
-log(`   Trail stop : activates at +${TRAIL_ON_PCT*100}%, trails ${TRAIL_DIST_PCT*100}% below peak`);
-log(`   Daily target: $${DAILY_TARGET}/day (tracking only — bot trades 24/7, no halt)`);
-log(`   Circuit brk: win rate < ${WR_MIN*100}% (min ${WR_MIN_TRADES} trades) → pause ${WR_PAUSE_MS/60000}min`);
-log(`   Watchlist  : ${WATCHLIST.length} symbols | ${BLACKLIST.size} blacklisted`);
-log(`   Timing     : scan=${SCAN_MS/1000}s | exit=${EXIT_POLL_MS/1000}s | fetch=${FETCH_DELAY_MS}ms | order=${ORDER_DELAY_MS}ms`);
+log(`   Target      : $${DAILY_TARGET}/day | $${RULES.targets?.yearly_profit_usdt?.toLocaleString()}/year (tracking, no halt)`);
+log(`   Timeframe   : ${TIMEFRAME} | MA${MA_PERIOD} | SMA${SMA_PERIOD} | RSI${RSI_PERIOD}`);
+log(`   Entry       : within ${MAX_MA_DIST_PCT*100}% of MA20 | 2-candle window | RSI filter | scored`);
+log(`   Stop-loss   : -${STOP_LOSS_PCT*100}%  Take-profit: +${TAKE_PROFIT_PCT*100}%  (R:R ${TAKE_PROFIT_PCT/STOP_LOSS_PCT}:1)`);
+log(`   Trail stop  : activates at +${TRAIL_ON_PCT*100}%, trails ${TRAIL_DIST_PCT*100}% below peak`);
+log(`   Circuit brk : win rate < ${WR_MIN*100}% (min ${WR_MIN_TRADES} trades) → pause ${WR_PAUSE_MS/60000}min`);
+log(`   Watchlist   : ${WATCHLIST.length} symbols | ${BLACKLIST.size} blacklisted`);
+log(`   Timing      : scan=${SCAN_MS/1000}s | exit=${EXIT_POLL_MS/1000}s | fetch=${FETCH_DELAY_MS}ms | order=${ORDER_DELAY_MS}ms`);
+log(`   Qty formula : dynamic precision by price tier (BTC=4dp ETH=3dp SOL=2dp ...)`);
 
 await scanEntry();
 setInterval(scanEntry, SCAN_MS);

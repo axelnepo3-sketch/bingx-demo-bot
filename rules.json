@@ -1,6 +1,6 @@
 {
   "strategy_name":            "MA SCALPER",
-  "version":                  "3.0",
+  "version":                  "3.1",
   "timeframe":                "1m",
   "watchlist": [
     "BTC-USDT",  "ETH-USDT",  "SOL-USDT",  "BSB-USDT",   "HYPE-USDT",
