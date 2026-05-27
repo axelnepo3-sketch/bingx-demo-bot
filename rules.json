@@ -1,6 +1,6 @@
 {
   "strategy_name":            "MA SCALPER",
-  "version":                  "3.1",
+  "version":                  "3.2",
   "timeframe":                "1m",
   "watchlist": [
     "BTC-USDT",  "ETH-USDT",  "SOL-USDT",  "BSB-USDT",   "HYPE-USDT",
@@ -124,6 +124,18 @@
     "yearly_profit_usdt": 50000
   },
 
+  "reversal_entry": {
+    "enabled":           true,
+    "description":       "Counter-trend entries allowed when volume confirms a possible reversal",
+    "long_in_short_bias":  "MA20 < SMA200 (short trend) + GREEN candle + prev RED + close ≥ MA20 + within 0.5% + RSI<70 + vol ≥ 2x avg → LONG",
+    "short_in_long_bias":  "MA20 > SMA200 (long  trend) + RED  candle + prev GREEN + close ≤ MA20 + within 0.5% + RSI>30 + vol ≥ 2x avg → SHORT",
+    "volume_multiplier": 2.0,
+    "volume_period":     20,
+    "size_multiplier":   0.50,
+    "stop_loss_pct":     0.015,
+    "note":              "Reversal entries use 50% normal size and -1.5% stop (tighter) vs trend entries at full size and -3% stop"
+  },
+
   "risk_management": {
     "stop_loss_pct":             0.03,
     "take_profit_pct":           0.06,
@@ -170,6 +182,7 @@
   },
 
   "changelog": {
+    "v3.2": "Counter-trend reversal entries: LONG in short-bias + SHORT in long-bias, gated by ≥2x volume surge. 50% size, -1.5% stop, reversalPositions tracker, volume field added to candles",
     "v3.1": "8-bug fix: dynamic qty precision, double-exit guard, livePrice for method A, checkDailyReset in pollExits, TDZ cleanup, removed dead DAILY_LOSS_LIM, MAX_DAILY log, closingPositions daily clear",
     "v3.0": "Hedge fund edition: take-profit +6%, trailing stop +3%/−2%, circuit breaker, RSI filter, signal scoring, daily target tracking",
     "v2.1": "2-candle freshness window, MA20 proximity 0.5%, SMA200 bias, blacklist additions",

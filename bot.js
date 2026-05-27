@@ -1,30 +1,27 @@
 /**
- * BingX Demo Trading Bot — MA20 Scalper v3.1 (Hedge Fund Edition)
+ * BingX Demo Trading Bot — MA20 Scalper v3.2 (Hedge Fund Edition)
  * Target: $200/day | $50,000/year
  *
- * Strategy:
- *   • LONG : GREEN candle + prev RED  + close ≥ MA20 + within 0.5% + MA20>SMA200 + RSI<70
- *   • SHORT: RED candle  + prev GREEN + close ≤ MA20 + within 0.5% + MA20<SMA200 + RSI>30
- *   • Entry valid on 1st or 2nd candle close only (2-candle freshness window)
+ * TWO entry modes per scan:
+ *
+ *   A) TREND-FOLLOWING (primary, no volume required)
+ *      LONG : MA20 > SMA200 + GREEN candle + prev RED  + close ≥ MA20 ± 0.5% + RSI < 70
+ *      SHORT: MA20 < SMA200 + RED candle  + prev GREEN + close ≤ MA20 ± 0.5% + RSI > 30
+ *
+ *   B) COUNTER-TREND REVERSAL (requires ≥ 2× 20-bar avg volume)
+ *      LONG : MA20 < SMA200 (short bias) + same candle pattern + volume surge → reversal BUY
+ *      SHORT: MA20 > SMA200 (long bias)  + same candle pattern + volume surge → reversal SELL
+ *      Size : capped at 50% of normal regardless of signal score
+ *      Stop : -1.5% margin PnL (tighter than trend's -3%)
  *
  * Risk management:
- *   • Stop-loss     -3%  PnL on margin  (hard, checked every 5s)
- *   • Take-profit   +6%  PnL on margin  (2:1 R:R, locks gain)
+ *   • Stop-loss     -3%  trend / -1.5% reversal  (hard, checked every 5s)
+ *   • Take-profit   +6%  PnL on margin (2:1 R:R vs trend stop)
  *   • Trailing stop activates at +3%, trails 2% below peak
- *   • $200/day target — tracked & displayed, NEVER halts trading
  *   • Win-rate circuit breaker: pause 30 min if WR < 40% (min 10 trades)
- *   • Signal quality scoring → position size 50% / 75% / 100%
+ *   • Signal quality scoring → position size 50% / 75% / 100% (trend only)
+ *   • $200/day target — tracked & displayed, NEVER halts trading
  *   • Bot trades 24/7 — no daily loss limit, no entry cap
- *
- * Bug fixes in v3.1:
- *   1. calcQty precision: dynamic decimal places by price tier (BTC no longer skipped)
- *   2. Double-exit guard: closingPositions Set prevents re-closing in-flight exits
- *   3. livePrice fetched when method A used → accurate stop/TP/trail log prices
- *   4. checkDailyReset() called in pollExits → peakPnl cleared at midnight
- *   5. peakPnl + winRatePauseUntil declared before checkDailyReset (no TDZ risk)
- *   6. Removed dead DAILY_LOSS_LIM variable
- *   7. MAX_DAILY hit now logs a message
- *   8. closingPositions cleared on confirmed close
  */
 
 import axios from "axios";
@@ -47,6 +44,7 @@ const TIMEFRAME       = RULES.timeframe;
 const MA_PERIOD       = RULES.indicators.MA20.length;              // 20
 const SMA_PERIOD      = RULES.indicators.SMA200.length;            // 200
 const RSI_PERIOD      = 14;
+const VOL_PERIOD      = 20;                                         // volume MA period
 const LEVERAGE        = RULES.position_sizing.leverage;            // 5
 const RISK_PCT        = RULES.position_sizing.risk_pct;            // 0.01
 const MAX_MARGIN      = RULES.position_sizing.max_margin;          // 500
@@ -63,13 +61,19 @@ const MAX_MA_DIST_PCT = RULES.entry?.max_ma_distance_pct || 0.005;
 // ── Risk Management Config ─────────────────────────────────────────────────────
 const rm              = RULES.risk_management || {};
 const STOP_LOSS_PCT   = rm.stop_loss_pct           || RULES.limits.stop_loss_pct || 0.03;
-const TAKE_PROFIT_PCT = rm.take_profit_pct         || 0.06;   // +6% PnL on margin
-const TRAIL_ON_PCT    = rm.trail_activate_pct      || 0.03;   // start trailing at +3%
-const TRAIL_DIST_PCT  = rm.trail_distance_pct      || 0.02;   // trail 2% below peak
+const TAKE_PROFIT_PCT = rm.take_profit_pct         || 0.06;
+const TRAIL_ON_PCT    = rm.trail_activate_pct      || 0.03;
+const TRAIL_DIST_PCT  = rm.trail_distance_pct      || 0.02;
 const DAILY_TARGET    = rm.daily_profit_target_usdt || 200;
-const WR_MIN          = rm.win_rate_min             || 0.40;   // 40% min win rate
-const WR_MIN_TRADES   = rm.win_rate_min_trades      || 10;     // trigger after 10+ trades
+const WR_MIN          = rm.win_rate_min             || 0.40;
+const WR_MIN_TRADES   = rm.win_rate_min_trades      || 10;
 const WR_PAUSE_MS     = (rm.win_rate_pause_minutes  || 30) * 60_000;
+
+// ── Reversal Config ────────────────────────────────────────────────────────────
+const rev = RULES.reversal_entry || {};
+const REVERSAL_VOL_MULT  = rev.volume_multiplier   || 2.0;   // ≥ 2× 20-bar avg volume
+const REVERSAL_STOP_PCT  = rev.stop_loss_pct       || 0.015; // -1.5% stop (tighter)
+const REVERSAL_SIZE_MULT = rev.size_multiplier     || 0.50;  // 50% of normal size
 
 const BLACKLIST = new Set(RULES.blacklist || []);
 const WATCHLIST = (RULES.watchlist || []).filter(s => !BLACKLIST.has(s));
@@ -139,9 +143,10 @@ function log(msg) {
   if (stats.log.length > 1000) stats.log.shift();
 }
 
-// ── FIX #5/6: Declare shared state BEFORE the functions that use them ──────────
-const peakPnl          = new Map();   // `${symbol}-${side}` → highest pnlPct seen (trailing stop)
-const closingPositions = new Set();   // FIX #2: positions with in-flight close orders
+// ── Shared state (declared before all functions that use them) ─────────────────
+const peakPnl           = new Map();   // `${sym}-${side}` → highest pnlPct seen
+const closingPositions  = new Set();   // in-flight close orders (prevent double-exit)
+const reversalPositions = new Set();   // counter-trend positions (use -1.5% stop)
 let   winRatePauseUntil = 0;
 
 // ── Daily reset ────────────────────────────────────────────────────────────────
@@ -159,6 +164,7 @@ function checkDailyReset() {
     winRatePauseUntil  = 0;
     peakPnl.clear();
     closingPositions.clear();
+    reversalPositions.clear();
     log(`📅 Daily reset — all counters cleared`);
   }
 }
@@ -167,12 +173,9 @@ function checkDailyReset() {
 function checkCircuitBreaker() {
   const total = perf.wins + perf.losses;
   if (total < WR_MIN_TRADES) return false;
-
   const wr = perf.wins / total;
   if (wr >= WR_MIN) return false;
-
   if (Date.now() < winRatePauseUntil) return true;
-
   winRatePauseUntil = Date.now() + WR_PAUSE_MS;
   log(`⚠️  CIRCUIT BREAKER — Win rate ${(wr * 100).toFixed(1)}% < ${WR_MIN * 100}% after ${total} trades → pausing ${WR_PAUSE_MS / 60000}min`);
   return true;
@@ -198,22 +201,22 @@ function rsi(closes, period = RSI_PERIOD) {
   return 100 - (100 / (1 + avgG / avgL));
 }
 
+// Volume average over last N closed bars (forming bar excluded)
+function volAvg(candles, period = VOL_PERIOD) {
+  const closed = candles.slice(0, -1);  // exclude forming bar
+  if (closed.length < period) return null;
+  const vols = closed.slice(-period).map(c => c.volume || 0);
+  return vols.reduce((a, b) => a + b, 0) / period;
+}
+
 // ── Signal quality score (3–8) → position size multiplier ─────────────────────
 function signalScore(distPct, bodyPct, ma20, sma200) {
   let s = 0;
-  // Proximity to MA20 (1-3 pts)
-  if (distPct < 0.001)      s += 3;
-  else if (distPct < 0.003) s += 2;
-  else                      s += 1;
-  // Candle body strength (1-3 pts)
-  if (bodyPct > 0.002)      s += 3;
-  else if (bodyPct > 0.001) s += 2;
-  else                      s += 1;
-  // Trend gap MA20 vs SMA200 (1-2 pts)
+  if (distPct < 0.001)      s += 3; else if (distPct < 0.003) s += 2; else s += 1;
+  if (bodyPct > 0.002)      s += 3; else if (bodyPct > 0.001) s += 2; else s += 1;
   const trendGap = sma200 > 0 ? Math.abs(ma20 - sma200) / sma200 : 0;
-  if (trendGap > 0.005)     s += 2;
-  else                      s += 1;
-  return s;   // range: 3–8
+  if (trendGap > 0.005)     s += 2; else s += 1;
+  return s;  // range: 3–8
 }
 
 function sizeMultiplier(score) {
@@ -223,40 +226,46 @@ function sizeMultiplier(score) {
 }
 
 // ── Entry signal ───────────────────────────────────────────────────────────────
-//  LONG:  GREEN candle + prev RED  + close ≥ MA20 (≤0.5% away) + MA20>SMA200 + RSI<70
-//  SHORT: RED candle  + prev GREEN + close ≤ MA20 (≤0.5% away) + MA20<SMA200 + RSI>30
-//  Returns { signal, score, distPct, bodyPct, rsi, ma20, sma200 } or null
+//
+//  MODE A — Trend-following (no volume requirement):
+//    LONG:  MA20 > SMA200 + GREEN + prevRED  + close ≥ MA20 + ≤0.5% + RSI<70
+//    SHORT: MA20 < SMA200 + RED  + prevGREEN + close ≤ MA20 + ≤0.5% + RSI>30
+//
+//  MODE B — Counter-trend reversal (requires ≥ 2× volume surge):
+//    LONG:  MA20 < SMA200 (short bias) + same candle rules → reversal BUY
+//    SHORT: MA20 > SMA200 (long  bias) + same candle rules → reversal SELL
+//
+//  Returns { signal, score, distPct, bodyPct, rsi, ma20, sma200, isReversal, volRatio } or null
+//
 function checkEntry(candles) {
   if (candles.length < SMA_PERIOD + 3) return null;
 
-  const curr = candles[candles.length - 2];   // last CLOSED bar
-  const prev = candles[candles.length - 3];   // bar before last closed
+  const curr = candles[candles.length - 2];  // last CLOSED bar
+  const prev = candles[candles.length - 3];  // bar before last closed
 
-  // Time unit safety (BingX returns ms; guard against seconds)
+  // Time unit safety
   const candleTime = curr.time < 1_000_000_000_000 ? curr.time * 1000 : curr.time;
+  const signalAge  = bingxNow() - (candleTime + CANDLE_MS);
+  if (signalAge < 0)              return null;  // candle still forming
+  if (signalAge >= CANDLE_MS * 2) return null;  // 3rd+ candle closed → stale
 
-  // Freshness: max 2 candle closes after signal candle close
-  const signalAge = bingxNow() - (candleTime + CANDLE_MS);
-  if (signalAge < 0)              return null;  // candle close still in the future
-  if (signalAge >= CANDLE_MS * 2) return null;  // 3rd+ candle has closed → stale
-
-  // Indicators — closed bars only (forming bar excluded via slice(0,-1))
+  // Indicators — closed bars only (slice off forming bar)
   const cc     = candles.slice(0, -1).map(c => c.close);
   const ma20   = sma(cc, MA_PERIOD);
   const sma200 = sma(cc, SMA_PERIOD);
   const rsiVal = rsi(cc);
   if (!ma20 || !sma200) return null;
 
-  // Trend bias filter (MA20 vs SMA200)
+  // Trend bias
   const bullish = ma20 > sma200;
   const bearish = ma20 < sma200;
   if (!bullish && !bearish) return null;  // MA20 == SMA200 → neutral, skip
 
-  // Minimum candle body (0.02% to filter doji/noise)
+  // Min candle body (0.02% — filters doji/noise)
   const bodyPct = Math.abs(curr.close - curr.open) / curr.open;
   if (bodyPct < MIN_BODY_PCT) return null;
 
-  // MA20 proximity — entry must be within 0.5% of MA20 (no chasing)
+  // MA20 proximity — must be within 0.5% (no chasing)
   const distPct = Math.abs(curr.close - ma20) / ma20;
   if (distPct > MAX_MA_DIST_PCT) return null;
 
@@ -265,20 +274,36 @@ function checkEntry(candles) {
   const prevRed   = prev.close < prev.open;
   const prevGreen = prev.close > prev.open;
 
-  // RSI filter — skip overbought LONGs and oversold SHORTs
   const rsiOK_long  = !rsiVal || rsiVal < 70;
   const rsiOK_short = !rsiVal || rsiVal > 30;
 
-  let signal = null;
+  // Volume ratio (used for reversal check and logging)
+  const avgVol  = volAvg(candles);
+  const currVol = curr.volume || 0;
+  const volRatio = avgVol && currVol > 0 ? currVol / avgVol : null;
+
+  let signal     = null;
+  let isReversal = false;
+
+  // ── MODE A: Trend-following (signal WITH the bias) ─────────────────────────
   if (bullish && currGreen && prevRed   && curr.close >= ma20 && rsiOK_long)  signal = "LONG";
   if (bearish && currRed   && prevGreen && curr.close <= ma20 && rsiOK_short) signal = "SHORT";
+
+  // ── MODE B: Counter-trend reversal (signal AGAINST the bias, needs volume) ─
+  if (!signal && avgVol && currVol >= avgVol * REVERSAL_VOL_MULT) {
+    // SHORT bias but LONG reversal (possible trend reversal up)
+    if (bearish && currGreen && prevRed   && curr.close >= ma20 && rsiOK_long)  { signal = "LONG";  isReversal = true; }
+    // LONG bias but SHORT reversal (possible trend reversal down)
+    if (bullish && currRed   && prevGreen && curr.close <= ma20 && rsiOK_short) { signal = "SHORT"; isReversal = true; }
+  }
+
   if (!signal) return null;
 
   const score = signalScore(distPct, bodyPct, ma20, sma200);
-  return { signal, score, distPct, bodyPct, rsi: rsiVal, ma20, sma200 };
+  return { signal, score, distPct, bodyPct, rsi: rsiVal, ma20, sma200, isReversal, volRatio };
 }
 
-// ── Exit signal (MA20 crossover only — no freshness guard, exits must always fire) ──
+// ── Exit signal (MA20 crossover — no freshness guard, exits always fire) ───────
 function checkExit(candles, side) {
   if (candles.length < SMA_PERIOD + 3) return false;
 
@@ -306,7 +331,12 @@ async function getCandles(symbol) {
     const candles = d.data.map(c => {
       let t = Number(c.time);
       if (t > 0 && t < 1_000_000_000_000) t *= 1000;
-      return { time: t, open: parseFloat(c.open), close: parseFloat(c.close) };
+      return {
+        time:   t,
+        open:   parseFloat(c.open),
+        close:  parseFloat(c.close),
+        volume: parseFloat(c.volume || 0)   // ← volume now included
+      };
     });
     candles.sort((a, b) => a.time - b.time);
     return candles;
@@ -334,39 +364,30 @@ async function getLivePrice(symbol) {
   } catch { return 0; }
 }
 
-// ── FIX #1: Position sizing — dynamic decimal precision by price tier ──────────
-//  OLD: Math.floor(x * 10) / 10  →  1 decimal  →  BTC@$100k gives qty=0 (SKIPPED)
-//  NEW: precision scales with price so every symbol gets a valid, tradable qty
+// ── Position sizing — dynamic decimal precision by price tier ──────────────────
 function calcQty(bal, price, multiplier = 1.0) {
   if (!bal || !price) return 0;
   const margin   = Math.min(bal * RISK_PCT, MAX_MARGIN) * multiplier;
   const notional = margin * LEVERAGE;
   const rawQty   = notional / price;
-
-  //  Price tier  →  decimals   Example
-  //  ≥ $10,000   →  4          BTC $100k: qty=0.0050 ✓  (was 0 ✗)
-  //  ≥ $1,000    →  3          ETH  $2.5k: qty=0.200 ✓
-  //  ≥ $10       →  2          SOL   $150: qty=3.33  ✓
-  //  ≥ $1        →  1          NEAR    $5: qty=50.0  ✓
-  //  < $1        →  0          DOGE $0.20: qty=2500  ✓
   let decimals;
-  if      (price >= 10_000) decimals = 4;
-  else if (price >=  1_000) decimals = 3;
-  else if (price >=     10) decimals = 2;
-  else if (price >=      1) decimals = 1;
-  else                      decimals = 0;
-
+  if      (price >= 10_000) decimals = 4;  // BTC-range
+  else if (price >=  1_000) decimals = 3;  // ETH-range
+  else if (price >=     10) decimals = 2;  // SOL-range
+  else if (price >=      1) decimals = 1;  // NEAR-range
+  else                      decimals = 0;  // sub-$1
   const factor = 10 ** decimals;
   return Math.floor(rawQty * factor) / factor;
 }
 
 // ── Place entry ────────────────────────────────────────────────────────────────
-async function placeEntry(symbol, signal, score, bal) {
+async function placeEntry(symbol, signal, score, bal, isReversal = false) {
   try {
     const price = await getLivePrice(symbol);
     if (!price) { log(`SKIP ${symbol} — no live price`); return false; }
 
-    const mult     = sizeMultiplier(score);
+    // Reversal: capped at 50% regardless of score — counter-trend = higher risk
+    const mult     = isReversal ? REVERSAL_SIZE_MULT : sizeMultiplier(score);
     const qty      = calcQty(bal, price, mult);
     const notional = qty * price;
     if (qty <= 0 || notional < MIN_NOTIONAL) {
@@ -376,8 +397,9 @@ async function placeEntry(symbol, signal, score, bal) {
 
     const side         = signal === "LONG" ? "BUY" : "SELL";
     const positionSide = signal;
+    const modeTag      = isReversal ? " ⚡REV" : "";
+    const stopStr      = isReversal ? `-${REVERSAL_STOP_PCT * 100}%` : `-${STOP_LOSS_PCT * 100}%`;
 
-    // Set leverage (ignore failure — may already be set)
     try { await POST("/openApi/swap/v2/trade/leverage", { symbol, side: signal, leverage: LEVERAGE }); } catch {}
 
     const r = await POST("/openApi/swap/v2/trade/order", {
@@ -387,7 +409,8 @@ async function placeEntry(symbol, signal, score, bal) {
     if (r?.code === 0) {
       stats.trades++;
       tradeToday++;
-      log(`✅ ENTRY ${signal.padEnd(5)} ${symbol.padEnd(18)} qty=${qty} @~${price} ${LEVERAGE}x | score=${score}/8(${(mult*100).toFixed(0)}%) | today=${tradeToday}`);
+      if (isReversal) reversalPositions.add(`${symbol}-${signal}`);
+      log(`✅ ENTRY${modeTag} ${signal.padEnd(5)} ${symbol.padEnd(18)} qty=${qty} @~${price} ${LEVERAGE}x | score=${score}/8(${(mult*100).toFixed(0)}%) stop=${stopStr} | today=${tradeToday}`);
       return true;
     } else {
       log(`❌ ENTRY FAIL  ${symbol} code=${r?.code} msg=${r?.msg}`);
@@ -403,7 +426,6 @@ async function placeEntry(symbol, signal, score, bal) {
 // ── Place exit ─────────────────────────────────────────────────────────────────
 async function placeExit(symbol, positionSide, qty, entryPrice, reason, knownPrice = 0) {
   try {
-    // FIX #3: always resolve a real exit price for accurate PnL logging
     const exitPrice = knownPrice || await getLivePrice(symbol);
     if (!exitPrice) { log(`SKIP EXIT ${symbol} — no live price`); return false; }
 
@@ -426,24 +448,25 @@ async function placeExit(symbol, positionSide, qty, entryPrice, reason, knownPri
       const total = perf.wins + perf.losses;
       const wr    = total ? ((perf.wins / total) * 100).toFixed(1) : "0.0";
       const icon  = pnl >= 0 ? "✅" : "❌";
+      const revTag = reversalPositions.has(`${symbol}-${positionSide}`) ? " ⚡REV" : "";
 
-      // FIX #2: remove from in-flight set on confirmed close
+      // Cleanup trackers
       peakPnl.delete(`${symbol}-${positionSide}`);
       closingPositions.delete(`${symbol}-${positionSide}`);
+      reversalPositions.delete(`${symbol}-${positionSide}`);
 
       stats.lastExit = new Date().toISOString();
-      log(`${icon} EXIT  ${positionSide.padEnd(5)} ${symbol.padEnd(18)} [${reason}] price:${(pricePct*100).toFixed(3)}% margin:${pnlPct.toFixed(2)}% | PnL:$${pnl.toFixed(2)} | Daily:$${perf.dailyPnl.toFixed(2)} | W/L:${perf.wins}/${perf.losses}(${wr}%)`);
+      log(`${icon} EXIT${revTag} ${positionSide.padEnd(5)} ${symbol.padEnd(18)} [${reason}] price:${(pricePct*100).toFixed(3)}% margin:${pnlPct.toFixed(2)}% | PnL:$${pnl.toFixed(2)} | Daily:$${perf.dailyPnl.toFixed(2)} | W/L:${perf.wins}/${perf.losses}(${wr}%)`);
       return true;
     } else {
       log(`❌ EXIT FAIL   ${symbol} [${reason}] code=${r?.code} msg=${r?.msg}`);
-      // FIX #2: remove from in-flight set on failure too (allow retry)
       closingPositions.delete(`${symbol}-${positionSide}`);
       return false;
     }
   } catch (e) {
     stats.errors++;
     log(`❌ EXIT ERROR  ${symbol}: ${e.message}`);
-    closingPositions.delete(`${symbol}-${positionSide}`);  // FIX #2: allow retry
+    closingPositions.delete(`${symbol}-${positionSide}`);
     return false;
   }
 }
@@ -462,7 +485,6 @@ async function scanEntry() {
     const positions = await getOpenPositions();
     if (positions.length >= MAX_OPEN) return;
 
-    // FIX #8: log when daily trade limit reached
     if (tradeToday >= MAX_DAILY) {
       log(`⏸  Daily trade limit ${MAX_DAILY} reached — no new entries until midnight reset`);
       return;
@@ -484,25 +506,28 @@ async function scanEntry() {
       if (tradeToday >= MAX_DAILY) break;
       if (openCount  >= MAX_OPEN)  break;
 
-      const cv  = await getCandles(sym);
+      const cv     = await getCandles(sym);
       await new Promise(r => setTimeout(r, FETCH_DELAY_MS));
 
       const result = checkEntry(cv);
       if (!result) continue;
 
-      const { signal, score, distPct, bodyPct, rsi: rsiVal } = result;
+      const { signal, score, distPct, bodyPct, rsi: rsiVal, isReversal, volRatio } = result;
       signals++;
 
       const lastBar  = cv[cv.length - 2];
       const age      = Math.round((bingxNow() - (lastBar.time + CANDLE_MS)) / 1000);
-      const rsiStr   = rsiVal ? rsiVal.toFixed(1) : "n/a";
-      log(`📊 SIGNAL ${signal.padEnd(5)} ${sym.padEnd(18)} score:${score}/8 | dist:${(distPct*100).toFixed(3)}% | body:${(bodyPct*100).toFixed(3)}% | RSI:${rsiStr} | age:${age}s`);
+      const rsiStr   = rsiVal  ? rsiVal.toFixed(1)   : "n/a";
+      const volStr   = volRatio ? `${volRatio.toFixed(1)}x` : "n/a";
+      const modeTag  = isReversal ? " ⚡REVERSAL" : "";
 
-      const placed = await placeEntry(sym, signal, score, bal);
+      log(`📊 SIGNAL${modeTag} ${signal.padEnd(5)} ${sym.padEnd(18)} score:${score}/8 | dist:${(distPct*100).toFixed(3)}% | body:${(bodyPct*100).toFixed(3)}% | RSI:${rsiStr} | vol:${volStr} | age:${age}s`);
+
+      const placed = await placeEntry(sym, signal, score, bal, isReversal);
       if (placed) {
         openCount++;
         busy.add(sym);
-        bal = await getBalance();  // refresh balance after each placed trade
+        bal = await getBalance();
         await new Promise(r => setTimeout(r, ORDER_DELAY_MS));
       }
     }
@@ -517,19 +542,14 @@ async function scanEntry() {
 }
 
 // ── Exit monitor ───────────────────────────────────────────────────────────────
-//
-//  Per position, priority order:
-//    1. Hard stop-loss    -3%  PnL on margin  → close immediately
-//    2. Hard take-profit  +6%  PnL on margin  → close immediately (2:1 R:R)
-//    3. Trailing stop     +3%  activate, trail 2% from peak
-//    4. MA20 crossover    strategy signal
+//  Priority: 1=stop-loss  2=take-profit  3=trailing-stop  4=MA20-crossover
+//  Reversal positions use -1.5% stop; trend positions use -3% stop
 //
 let polling = false;
 async function pollExits() {
   if (polling) return;
   polling = true;
   try {
-    // FIX #4: ensure peakPnl cleared at midnight even if no scan is running
     checkDailyReset();
 
     const positions = await getOpenPositions();
@@ -545,11 +565,13 @@ async function pollExits() {
       if (!entry) continue;
 
       const posKey = `${sym}-${side}`;
+      if (closingPositions.has(posKey)) continue;  // already closing
 
-      // FIX #2: skip positions with in-flight close orders (prevent double-exit)
-      if (closingPositions.has(posKey)) continue;
+      // Reversal positions get a tighter stop (-1.5% instead of -3%)
+      const isRev   = reversalPositions.has(posKey);
+      const stopPct = isRev ? REVERSAL_STOP_PCT : STOP_LOSS_PCT;
 
-      // ── COMPUTE CURRENT PnL ─────────────────────────────────────────────────
+      // ── COMPUTE PnL ───────────────────────────────────────────────────────
       let pnlPct    = null;
       let pnlUsd    = null;
       let pnlSource = "";
@@ -562,12 +584,10 @@ async function pollExits() {
         pnlPct    = bxPnl / bxMargin;
         pnlUsd    = bxPnl;
         pnlSource = "bingx";
-
-        // FIX #3: fetch live price when method A is used so stop/TP/trail logs are accurate
-        livePrice = await getLivePrice(sym);
+        livePrice = await getLivePrice(sym);  // fetch for accurate log
       }
 
-      // Method B: live price × leverage (fallback when BingX fields unavailable)
+      // Method B: live price × leverage (fallback)
       if (pnlPct === null) {
         livePrice = await getLivePrice(sym);
         if (livePrice > 0) {
@@ -580,12 +600,12 @@ async function pollExits() {
       }
 
       if (pnlPct === null) {
-        // Can't compute PnL — fall back to MA crossover check only
+        // PnL unknown — attempt MA crossover exit only
         const cv = await getCandles(sym);
         await new Promise(r => setTimeout(r, FETCH_DELAY_MS));
         if (cv.length && checkExit(cv, side)) {
           log(`🔔 EXIT  ${side.padEnd(5)} ${sym.padEnd(18)} [MA20-cross] PnL:unknown`);
-          closingPositions.add(posKey);  // FIX #2: mark in-flight
+          closingPositions.add(posKey);
           await placeExit(sym, side, qty, entry, "MA20-cross");
           await new Promise(r => setTimeout(r, ORDER_DELAY_MS));
         }
@@ -597,34 +617,36 @@ async function pollExits() {
       if (pnlPct > prevPeak) peakPnl.set(posKey, pnlPct);
       const peak = peakPnl.get(posKey);
 
-      // ── 1. HARD STOP-LOSS ──────────────────────────────────────────────────
-      if (pnlPct <= -STOP_LOSS_PCT) {
-        log(`🛑 STOP-LOSS   ${side.padEnd(5)} ${sym.padEnd(18)} PnL:${(pnlPct*100).toFixed(2)}% $${(pnlUsd??0).toFixed(2)} [${pnlSource}]`);
-        closingPositions.add(posKey);  // FIX #2: mark in-flight
-        await placeExit(sym, side, qty, entry, "stop-loss", livePrice);
+      const revTag = isRev ? " ⚡REV" : "";
+
+      // ── 1. HARD STOP-LOSS ────────────────────────────────────────────────
+      if (pnlPct <= -stopPct) {
+        log(`🛑 STOP-LOSS${revTag}  ${side.padEnd(5)} ${sym.padEnd(18)} PnL:${(pnlPct*100).toFixed(2)}% $${(pnlUsd??0).toFixed(2)} [${pnlSource}] stop=${stopPct*100}%`);
+        closingPositions.add(posKey);
+        await placeExit(sym, side, qty, entry, `stop-loss${isRev ? "-rev" : ""}`, livePrice);
         await new Promise(r => setTimeout(r, ORDER_DELAY_MS));
         continue;
       }
 
-      // ── 2. HARD TAKE-PROFIT ────────────────────────────────────────────────
+      // ── 2. HARD TAKE-PROFIT ──────────────────────────────────────────────
       if (pnlPct >= TAKE_PROFIT_PCT) {
-        log(`🎯 TAKE-PROFIT ${side.padEnd(5)} ${sym.padEnd(18)} PnL:${(pnlPct*100).toFixed(2)}% $${(pnlUsd??0).toFixed(2)}`);
-        closingPositions.add(posKey);  // FIX #2: mark in-flight
-        await placeExit(sym, side, qty, entry, "take-profit", livePrice);
+        log(`🎯 TAKE-PROFIT${revTag} ${side.padEnd(5)} ${sym.padEnd(18)} PnL:${(pnlPct*100).toFixed(2)}% $${(pnlUsd??0).toFixed(2)}`);
+        closingPositions.add(posKey);
+        await placeExit(sym, side, qty, entry, `take-profit${isRev ? "-rev" : ""}`, livePrice);
         await new Promise(r => setTimeout(r, ORDER_DELAY_MS));
         continue;
       }
 
-      // ── 3. TRAILING STOP ───────────────────────────────────────────────────
+      // ── 3. TRAILING STOP ─────────────────────────────────────────────────
       if (peak >= TRAIL_ON_PCT && pnlPct <= peak - TRAIL_DIST_PCT) {
-        log(`📉 TRAIL-STOP  ${side.padEnd(5)} ${sym.padEnd(18)} peak:${(peak*100).toFixed(2)}% now:${(pnlPct*100).toFixed(2)}%`);
-        closingPositions.add(posKey);  // FIX #2: mark in-flight
-        await placeExit(sym, side, qty, entry, "trail-stop", livePrice);
+        log(`📉 TRAIL-STOP${revTag}  ${side.padEnd(5)} ${sym.padEnd(18)} peak:${(peak*100).toFixed(2)}% now:${(pnlPct*100).toFixed(2)}%`);
+        closingPositions.add(posKey);
+        await placeExit(sym, side, qty, entry, `trail-stop${isRev ? "-rev" : ""}`, livePrice);
         await new Promise(r => setTimeout(r, ORDER_DELAY_MS));
         continue;
       }
 
-      // ── 4. MA20 CROSSOVER ──────────────────────────────────────────────────
+      // ── 4. MA20 CROSSOVER ────────────────────────────────────────────────
       const cv = await getCandles(sym);
       await new Promise(r => setTimeout(r, FETCH_DELAY_MS));
       if (!cv.length) continue;
@@ -632,9 +654,9 @@ async function pollExits() {
 
       const lastBar = cv[cv.length - 2];
       const age     = Math.round((bingxNow() - (lastBar.time + CANDLE_MS)) / 1000);
-      log(`🔔 EXIT  ${side.padEnd(5)} ${sym.padEnd(18)} [MA20-cross] PnL:${(pnlPct*100).toFixed(2)}% | age:${age}s`);
-      closingPositions.add(posKey);  // FIX #2: mark in-flight
-      await placeExit(sym, side, qty, entry, "MA20-cross", livePrice);
+      log(`🔔 EXIT${revTag}  ${side.padEnd(5)} ${sym.padEnd(18)} [MA20-cross] PnL:${(pnlPct*100).toFixed(2)}% | age:${age}s`);
+      closingPositions.add(posKey);
+      await placeExit(sym, side, qty, entry, `MA20-cross${isRev ? "-rev" : ""}`, livePrice);
       await new Promise(r => setTimeout(r, ORDER_DELAY_MS));
     }
   } catch (e) {
@@ -653,7 +675,6 @@ http.createServer((req, res) => {
   }
   const total    = perf.wins + perf.losses;
   const winRatio = total ? `${((perf.wins / total) * 100).toFixed(1)}%` : "0%";
-  const progress = `${perf.dailyPnl.toFixed(2)} / $${DAILY_TARGET} (${((perf.dailyPnl / DAILY_TARGET) * 100).toFixed(1)}%)`;
   const paused   = winRatePauseUntil > Date.now()
     ? `circuit breaker — resumes in ${Math.ceil((winRatePauseUntil - Date.now()) / 60000)}min`
     : null;
@@ -672,27 +693,33 @@ http.createServer((req, res) => {
       wins:          perf.wins,
       losses:        perf.losses,
       winRatio,
-      dailyPnl:      `$${progress}`,
-      note:          "Target is informational — bot never halts on profit"
+      dailyPnl:      `$${perf.dailyPnl.toFixed(2)} / $${DAILY_TARGET}`,
+      progress:      `${((perf.dailyPnl / DAILY_TARGET) * 100).toFixed(1)}%`
+    },
+    entryModes: {
+      trend_following:  "LONG if MA20>SMA200 | SHORT if MA20<SMA200 | no volume required",
+      counter_reversal: `LONG if MA20<SMA200 + vol≥${REVERSAL_VOL_MULT}x avg | SHORT if MA20>SMA200 + vol≥${REVERSAL_VOL_MULT}x avg`,
+      reversal_size:    `${REVERSAL_SIZE_MULT * 100}% of normal (fixed)`,
+      reversal_stop:    `-${REVERSAL_STOP_PCT * 100}% margin (vs -${STOP_LOSS_PCT * 100}% trend)`
     },
     riskManagement: {
-      stopLoss:       `-${STOP_LOSS_PCT * 100}% margin`,
-      takeProfit:     `+${TAKE_PROFIT_PCT * 100}% margin`,
-      trailActivate:  `+${TRAIL_ON_PCT * 100}% margin`,
-      trailDistance:  `${TRAIL_DIST_PCT * 100}% from peak`,
-      dailyTarget:    `$${DAILY_TARGET} (tracking only — no halt)`,
-      circuitBreaker: paused || "inactive"
+      stopLoss_trend:    `-${STOP_LOSS_PCT * 100}% margin`,
+      stopLoss_reversal: `-${REVERSAL_STOP_PCT * 100}% margin`,
+      takeProfit:        `+${TAKE_PROFIT_PCT * 100}% margin`,
+      trailActivate:     `+${TRAIL_ON_PCT * 100}% margin`,
+      trailDistance:     `${TRAIL_DIST_PCT * 100}% from peak`,
+      circuitBreaker:    paused || "inactive"
     },
     config: {
-      timeframe:  TIMEFRAME,
-      leverage:   `${LEVERAGE}x`,
-      riskPct:    `${RISK_PCT * 100}%`,
-      maxMargin:  `$${MAX_MARGIN}`,
-      maxMaDist:  `${MAX_MA_DIST_PCT * 100}%`,
-      watchlist:  WATCHLIST.length,
-      blacklist:  BLACKLIST.size,
-      scan:       `${SCAN_MS / 1000}s`,
-      exit:       `${EXIT_POLL_MS / 1000}s`
+      timeframe: TIMEFRAME,
+      leverage:  `${LEVERAGE}x`,
+      riskPct:   `${RISK_PCT * 100}%`,
+      maxMargin: `$${MAX_MARGIN}`,
+      maxMaDist: `${MAX_MA_DIST_PCT * 100}%`,
+      watchlist: WATCHLIST.length,
+      blacklist: BLACKLIST.size,
+      scan:      `${SCAN_MS / 1000}s`,
+      exit:      `${EXIT_POLL_MS / 1000}s`
     }
   }, null, 2));
 }).listen(PORT, () => log(`🌐 Dashboard → http://localhost:${PORT}`));
@@ -700,15 +727,15 @@ http.createServer((req, res) => {
 // ── Boot ───────────────────────────────────────────────────────────────────────
 await syncClock();
 log(`🏦 ${RULES.strategy_name} v${RULES.version} — HEDGE FUND EDITION`);
-log(`   Target      : $${DAILY_TARGET}/day | $${RULES.targets?.yearly_profit_usdt?.toLocaleString()}/year (tracking, no halt)`);
-log(`   Timeframe   : ${TIMEFRAME} | MA${MA_PERIOD} | SMA${SMA_PERIOD} | RSI${RSI_PERIOD}`);
-log(`   Entry       : within ${MAX_MA_DIST_PCT*100}% of MA20 | 2-candle window | RSI filter | scored`);
-log(`   Stop-loss   : -${STOP_LOSS_PCT*100}%  Take-profit: +${TAKE_PROFIT_PCT*100}%  (R:R ${TAKE_PROFIT_PCT/STOP_LOSS_PCT}:1)`);
-log(`   Trail stop  : activates at +${TRAIL_ON_PCT*100}%, trails ${TRAIL_DIST_PCT*100}% below peak`);
-log(`   Circuit brk : win rate < ${WR_MIN*100}% (min ${WR_MIN_TRADES} trades) → pause ${WR_PAUSE_MS/60000}min`);
-log(`   Watchlist   : ${WATCHLIST.length} symbols | ${BLACKLIST.size} blacklisted`);
-log(`   Timing      : scan=${SCAN_MS/1000}s | exit=${EXIT_POLL_MS/1000}s | fetch=${FETCH_DELAY_MS}ms | order=${ORDER_DELAY_MS}ms`);
-log(`   Qty formula : dynamic precision by price tier (BTC=4dp ETH=3dp SOL=2dp ...)`);
+log(`   Target       : $${DAILY_TARGET}/day | $${RULES.targets?.yearly_profit_usdt?.toLocaleString()}/year`);
+log(`   Timeframe    : ${TIMEFRAME} | MA${MA_PERIOD} | SMA${SMA_PERIOD} | RSI${RSI_PERIOD}`);
+log(`   ── TREND ENTRY  ──  within ${MAX_MA_DIST_PCT*100}% of MA20 | 2-candle window | RSI filter | scored size`);
+log(`   ── REVERSAL     ──  counter-trend + vol ≥ ${REVERSAL_VOL_MULT}x avg | 50% size | stop -${REVERSAL_STOP_PCT*100}%`);
+log(`   Stop-loss    : -${STOP_LOSS_PCT*100}% trend / -${REVERSAL_STOP_PCT*100}% reversal`);
+log(`   Take-profit  : +${TAKE_PROFIT_PCT*100}%  |  Trail: activates +${TRAIL_ON_PCT*100}%, trails ${TRAIL_DIST_PCT*100}% below peak`);
+log(`   Circuit brk  : WR < ${WR_MIN*100}% (min ${WR_MIN_TRADES} trades) → pause ${WR_PAUSE_MS/60000}min`);
+log(`   Watchlist    : ${WATCHLIST.length} symbols | ${BLACKLIST.size} blacklisted`);
+log(`   Timing       : scan=${SCAN_MS/1000}s | exit=${EXIT_POLL_MS/1000}s | fetch=${FETCH_DELAY_MS}ms | order=${ORDER_DELAY_MS}ms`);
 
 await scanEntry();
 setInterval(scanEntry, SCAN_MS);
