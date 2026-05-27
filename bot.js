@@ -122,31 +122,40 @@ function sma(closes, period) {
 }
 
 // ── Entry signal ───────────────────────────────────────────────────────────────
-// LONG:  GREEN candle (close>open), prev RED (close<open), close >= MA20, body >= 0.02%
-//        BIAS: only if MA20 > SMA200 strictly (bullish trend)
-// SHORT: RED candle  (close<open), prev GREEN(close>open), close <= MA20, body >= 0.02%
-//        BIAS: only if MA20 < SMA200 strictly (bearish trend)
-// MA20 == SMA200 → no entries (no clear trend)
-// Uses last CLOSED candle (skip the currently-forming bar at index -1)
+//
+//  Rules (per rules.json):
+//    LONG  — GREEN candle (close > open), prev candle RED, close >= MA20, MA20 > SMA200
+//    SHORT — RED candle   (close < open), prev candle GREEN, close <= MA20, MA20 < SMA200
+//
+//  Candle index (after ascending sort):
+//    candles[-1] = FORMING bar  (incomplete — NEVER used for signals)
+//    candles[-2] = last CLOSED candle  ← curr
+//    candles[-3] = candle before that  ← prev
+//
+//  MA computed over CLOSED bars only (slice 0..-1 excludes forming bar).
+//
 function checkEntry(candles) {
+  // need SMA_PERIOD closed bars + prev closed bar + forming bar = SMA_PERIOD + 2 + 1
   if (candles.length < SMA_PERIOD + 3) return null;
 
-  const curr   = candles[candles.length - 2];  // last closed candle
-  const prev   = candles[candles.length - 3];  // candle before that
-  const closes = candles.map(c => c.close);
+  const curr = candles[candles.length - 2];   // last CLOSED bar
+  const prev = candles[candles.length - 3];   // bar before last closed
 
-  const currMA20  = sma(closes, MA_PERIOD);
-  const currSMA200 = sma(closes, SMA_PERIOD);
-  if (!currMA20 || !currSMA200) return null;
+  // ── MA over CLOSED bars only (exclude the forming bar at -1) ───────────────
+  const cc = candles.slice(0, -1).map(c => c.close);   // closed closes
+  const ma20   = sma(cc, MA_PERIOD);
+  const sma200 = sma(cc, SMA_PERIOD);
+  if (!ma20 || !sma200) return null;
 
-  // ── SMA200 BIAS FILTER ──────────────────────────────────────────────────────
-  // MA20 strictly > SMA200 → bullish trend, LONG only
-  // MA20 strictly < SMA200 → bearish trend, SHORT only
-  // MA20 == SMA200          → no clear trend, skip
-  const bullish = currMA20 > currSMA200;
-  const bearish = currMA20 < currSMA200;
-  if (!bullish && !bearish) return null;  // exactly equal → skip
+  // ── SMA200 TREND BIAS ───────────────────────────────────────────────────────
+  //   MA20 strictly > SMA200 → bullish  → LONG entries only
+  //   MA20 strictly < SMA200 → bearish  → SHORT entries only
+  //   MA20 == SMA200          → no trend → skip
+  const bullish = ma20 > sma200;
+  const bearish = ma20 < sma200;
+  if (!bullish && !bearish) return null;
 
+  // ── BODY SIZE FILTER ────────────────────────────────────────────────────────
   const bodyPct = Math.abs(curr.close - curr.open) / curr.open;
   if (bodyPct < MIN_BODY_PCT) return null;
 
@@ -155,27 +164,38 @@ function checkEntry(candles) {
   const prevRed   = prev.close < prev.open;
   const prevGreen = prev.close > prev.open;
 
-  if (bullish && currGreen && prevRed   && curr.close >= currMA20) return "LONG";
-  if (bearish && currRed   && prevGreen && curr.close <= currMA20) return "SHORT";
+  // LONG:  GREEN reversal candle, close ABOVE MA20, bullish trend
+  if (bullish && currGreen && prevRed   && curr.close >= ma20) return "LONG";
+  // SHORT: RED reversal candle, close BELOW MA20, bearish trend
+  if (bearish && currRed   && prevGreen && curr.close <= ma20) return "SHORT";
   return null;
 }
 
 // ── Exit signal ────────────────────────────────────────────────────────────────
-// LONG exit:  curr.close < MA20 AND prev.close >= MA20  (price crossed below)
-// SHORT exit: curr.close > MA20 AND prev.close <= MA20  (price crossed above)
-// Uses last CLOSED candle (skip the currently-forming bar at index -1)
+//  LONG  exit: close crossed BELOW MA20 → curr.close < MA20 && prev.close >= prevMA20
+//  SHORT exit: close crossed ABOVE MA20 → curr.close > MA20 && prev.close <= prevMA20
+//
+//  Both curr and prev MA are computed from CLOSED bars only, at their respective
+//  bar positions, so the crossover check is always self-consistent.
+//
 function checkExit(candles, side) {
   if (candles.length < SMA_PERIOD + 3) return false;
 
-  const closes    = candles.map(c => c.close);
-  const currClose = closes[closes.length - 2];  // last closed candle
-  const prevClose = closes[closes.length - 3];  // candle before that
-  const currMA    = sma(closes, MA_PERIOD);
-  const prevMA    = sma(closes.slice(0, -1), MA_PERIOD);
+  // ── closed-only closes, split at current and previous position ──────────────
+  const cc      = candles.slice(0, -1).map(c => c.close);  // all closed closes
+  const ccPrev  = cc.slice(0, -1);                          // closed closes up to prev bar
+
+  const currClose = cc[cc.length - 1];        // last closed bar's close
+  const prevClose = ccPrev[ccPrev.length - 1]; // prev closed bar's close
+
+  const currMA = sma(cc,     MA_PERIOD);
+  const prevMA = sma(ccPrev, MA_PERIOD);
   if (!currMA || !prevMA) return false;
 
-  if (side === "LONG")  return currClose < currMA  && prevClose >= prevMA;
-  if (side === "SHORT") return currClose > currMA  && prevClose <= prevMA;
+  // LONG exit:  price crossed BELOW MA20 (was above, now below)
+  if (side === "LONG")  return currClose < currMA && prevClose >= prevMA;
+  // SHORT exit: price crossed ABOVE MA20 (was below, now above)
+  if (side === "SHORT") return currClose > currMA && prevClose <= prevMA;
   return false;
 }
 
@@ -183,11 +203,17 @@ function checkExit(candles, side) {
 async function getCandles(symbol) {
   try {
     const d = await GET("/openApi/swap/v3/quote/klines", {
-      symbol, interval: TIMEFRAME, limit: SMA_PERIOD + 4   // 204 — enough for SMA200
+      symbol, interval: TIMEFRAME, limit: SMA_PERIOD + 4   // 204 bars = enough for SMA200
     });
     if (!Array.isArray(d?.data)) return [];
-    // v3 klines returns objects: { open, high, low, close, volume, time }
-    return d.data.map(c => ({ time: c.time, open: parseFloat(c.open), close: parseFloat(c.close) }));
+    const candles = d.data.map(c => ({
+      time:  Number(c.time),
+      open:  parseFloat(c.open),
+      close: parseFloat(c.close)
+    }));
+    // CRITICAL: sort ascending (oldest → newest) — BingX v3 may return newest-first
+    candles.sort((a, b) => a.time - b.time);
+    return candles;
   } catch { return []; }
 }
 
