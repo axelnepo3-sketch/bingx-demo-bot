@@ -28,12 +28,13 @@ const RISK_PCT       = RULES.position_sizing.risk_pct;           // 0.01
 const MAX_MARGIN     = RULES.position_sizing.max_margin;         // 500
 const MAX_OPEN       = RULES.limits.max_open_positions;          // 20
 const MAX_DAILY      = RULES.limits.max_trades_per_day;          // 500
-const ORDER_DELAY_MS = RULES.limits.api_delay_ms;                // 500ms — after order placement only
-const FETCH_DELAY_MS = RULES.limits.fetch_delay_ms || 200;       // 200ms — between candle fetches
-const SCAN_MS        = RULES.limits.scan_interval_ms;            // 5000
-const EXIT_POLL_MS   = RULES.limits.exit_poll_ms || 5000;        // 5000
-const MIN_BODY_PCT   = 0.0002;
-const STOP_LOSS_PCT  = RULES.limits.stop_loss_pct || 0.03;
+const ORDER_DELAY_MS  = RULES.limits.api_delay_ms;                // 500ms — after order placement only
+const FETCH_DELAY_MS  = RULES.limits.fetch_delay_ms || 200;       // 200ms — between candle fetches
+const SCAN_MS         = RULES.limits.scan_interval_ms;            // 5000
+const EXIT_POLL_MS    = RULES.limits.exit_poll_ms || 5000;        // 5000
+const MIN_BODY_PCT    = 0.0002;
+const STOP_LOSS_PCT   = RULES.limits.stop_loss_pct || 0.03;
+const MAX_MA_DIST_PCT = RULES.entry?.max_ma_distance_pct || 0.005; // 0.5% max distance from MA20
 const BLACKLIST      = new Set(RULES.blacklist || []);
 const WATCHLIST      = (RULES.watchlist || []).filter(s => !BLACKLIST.has(s));
 const PORT           = process.env.PORT || 3000;
@@ -142,28 +143,26 @@ function sma(closes, period) {
 //  MA computed over CLOSED bars only (slice 0..-1 excludes forming bar).
 //
 function checkEntry(candles) {
-  // need SMA_PERIOD closed bars + prev closed bar + forming bar = SMA_PERIOD + 2 + 1
+  // need SMA_PERIOD closed bars + prev closed bar + forming bar
   if (candles.length < SMA_PERIOD + 3) return null;
 
   const curr = candles[candles.length - 2];   // last CLOSED bar
   const prev = candles[candles.length - 3];   // bar before last closed
 
-  // ── FRESHNESS GUARD — skip signals older than 2 candle durations ────────────
-  // curr.time = candle OPEN time; candle CLOSE time = curr.time + CANDLE_MS
-  // If more than 2 bars have passed since curr closed, the signal is stale.
+  // ── FRESHNESS GUARD ─────────────────────────────────────────────────────────
+  // Only act on a signal within 1.5 candle durations of it closing.
+  // On 1m: max 90s after candle close. Prevents chasing moves from old bars.
   const signalAge = bingxNow() - (curr.time + CANDLE_MS);
-  if (signalAge > CANDLE_MS * 2) return null;  // too old — at least 2 bars have formed since
+  if (signalAge < 0)             return null;  // candle hasn't closed yet
+  if (signalAge > CANDLE_MS * 1.5) return null;  // too old (>1.5 bars ago)
 
   // ── MA over CLOSED bars only (exclude the forming bar at -1) ───────────────
-  const cc = candles.slice(0, -1).map(c => c.close);   // closed closes
+  const cc     = candles.slice(0, -1).map(c => c.close);
   const ma20   = sma(cc, MA_PERIOD);
   const sma200 = sma(cc, SMA_PERIOD);
   if (!ma20 || !sma200) return null;
 
   // ── SMA200 TREND BIAS ───────────────────────────────────────────────────────
-  //   MA20 strictly > SMA200 → bullish  → LONG entries only
-  //   MA20 strictly < SMA200 → bearish  → SHORT entries only
-  //   MA20 == SMA200          → no trend → skip
   const bullish = ma20 > sma200;
   const bearish = ma20 < sma200;
   if (!bullish && !bearish) return null;
@@ -177,9 +176,18 @@ function checkEntry(candles) {
   const prevRed   = prev.close < prev.open;
   const prevGreen = prev.close > prev.open;
 
-  // LONG:  GREEN reversal candle, close ABOVE MA20, bullish trend
+  // ── MA20 PROXIMITY FILTER ───────────────────────────────────────────────────
+  // Entry must be within MAX_MA_DIST_PCT (0.5%) of MA20.
+  // Rejects entries where price has already run too far from MA20.
+  // LONG:  close must be >= ma20 but not more than 0.5% above it
+  // SHORT: close must be <= ma20 but not more than 0.5% below it
+  const distPct = Math.abs(curr.close - ma20) / ma20;
+  if (distPct > MAX_MA_DIST_PCT) return null;
+
+  // ── SIGNAL ─────────────────────────────────────────────────────────────────
+  // LONG:  GREEN reversal candle, close just ABOVE MA20, bullish trend
   if (bullish && currGreen && prevRed   && curr.close >= ma20) return "LONG";
-  // SHORT: RED reversal candle, close BELOW MA20, bearish trend
+  // SHORT: RED reversal candle,  close just BELOW MA20, bearish trend
   if (bearish && currRed   && prevGreen && curr.close <= ma20) return "SHORT";
   return null;
 }
@@ -194,12 +202,19 @@ function checkEntry(candles) {
 function checkExit(candles, side) {
   if (candles.length < SMA_PERIOD + 3) return false;
 
-  // ── closed-only closes, split at current and previous position ──────────────
-  const cc      = candles.slice(0, -1).map(c => c.close);  // all closed closes
-  const ccPrev  = cc.slice(0, -1);                          // closed closes up to prev bar
+  const lastClosed = candles[candles.length - 2];
 
-  const currClose = cc[cc.length - 1];        // last closed bar's close
-  const prevClose = ccPrev[ccPrev.length - 1]; // prev closed bar's close
+  // ── FRESHNESS GUARD — only act on the most recent crossover candle ──────────
+  const signalAge = bingxNow() - (lastClosed.time + CANDLE_MS);
+  if (signalAge < 0)               return false;  // candle not closed yet
+  if (signalAge > CANDLE_MS * 1.5) return false;  // crossover candle is stale
+
+  // ── closed-only closes, split at current and previous position ──────────────
+  const cc     = candles.slice(0, -1).map(c => c.close);  // all closed closes
+  const ccPrev = cc.slice(0, -1);                          // closed closes up to prev bar
+
+  const currClose = cc[cc.length - 1];
+  const prevClose = ccPrev[ccPrev.length - 1];
 
   const currMA = sma(cc,     MA_PERIOD);
   const prevMA = sma(ccPrev, MA_PERIOD);
@@ -373,8 +388,12 @@ async function scanEntry() {
       if (!sig) continue;
 
       signals++;
-      const candleAge = Math.round((bingxNow() - (cv[cv.length - 2]?.time + CANDLE_MS)) / 1000);
-      log(`📊 SIGNAL ${sig.padEnd(5)} ${sym.padEnd(18)} | candle age: ${candleAge}s`);
+      const lastBar   = cv[cv.length - 2];
+      const candleAge = Math.round((bingxNow() - (lastBar?.time + CANDLE_MS)) / 1000);
+      const cc        = cv.slice(0, -1).map(c => c.close);
+      const ma20val   = sma(cc, MA_PERIOD) || 0;
+      const distPct   = ma20val ? ((Math.abs(lastBar.close - ma20val) / ma20val) * 100).toFixed(3) : "?";
+      log(`📊 SIGNAL ${sig.padEnd(5)} ${sym.padEnd(18)} | dist:${distPct}% from MA20 | age:${candleAge}s`);
 
       const placed = await placeEntry(sym, sig, bal);
       if (placed) {

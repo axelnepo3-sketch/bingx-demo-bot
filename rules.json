@@ -41,30 +41,35 @@
   },
 
   "entry": {
-    "long":  "LONG when: GREEN candle (close>open) + prev RED + curr.close >= MA20 + MA20 > SMA200",
-    "short": "SHORT when: RED candle (close<open) + prev GREEN + curr.close <= MA20 + MA20 < SMA200",
-    "order_type": "MARKET — fills immediately at best available price",
+    "long":  "LONG: GREEN candle + prev RED + close ABOVE MA20 + within 0.5% of MA20 + MA20 > SMA200 + signal fresh within 1.5 bars",
+    "short": "SHORT: RED candle + prev GREEN + close BELOW MA20 + within 0.5% of MA20 + MA20 < SMA200 + signal fresh within 1.5 bars",
+    "order_type":          "MARKET — fills immediately at best available price",
+    "max_ma_distance_pct": 0.005,
+    "freshness_candles":   1.5,
     "logic": {
-      "step1_bias":      "MA20 > SMA200 → LONG only | MA20 < SMA200 → SHORT only | equal → skip",
-      "step2_body":      "|close - open| / open >= 0.0002 (0.02% minimum candle body)",
-      "step3_reversal":  "curr GREEN + prev RED for LONG | curr RED + prev GREEN for SHORT",
-      "step4_ma20":      "curr.close >= MA20 for LONG (price above MA20) | curr.close <= MA20 for SHORT (price below MA20)",
-      "purpose":         "Trend-filtered MA20 bounce — trade reversal candles in the direction of SMA200 trend"
+      "step1_freshness": "Signal candle closed within 1.5x candle duration — no stale entries",
+      "step2_bias":      "MA20 > SMA200 → LONG only | MA20 < SMA200 → SHORT only | equal → skip",
+      "step3_body":      "|close - open| / open >= 0.0002 (0.02% min body)",
+      "step4_reversal":  "curr GREEN + prev RED for LONG | curr RED + prev GREEN for SHORT",
+      "step5_ma20":      "curr.close >= MA20 for LONG | curr.close <= MA20 for SHORT",
+      "step6_proximity": "|close - MA20| / MA20 <= 0.005 — must be within 0.5% of MA20, no chasing",
+      "purpose":         "Tight MA20 bounce entries — fresh, close to MA20, trend-aligned only"
     }
   },
 
   "exit": {
-    "long":       "Close LONG when: curr.close < MA20 AND prev.close >= prevMA20 (crossed below)",
-    "short":      "Close SHORT when: curr.close > MA20 AND prev.close <= prevMA20 (crossed above)",
-    "stop_loss":  "-3% unrealized PnL on margin — hard stop checked every 10s with LIVE price",
+    "long":       "Close LONG: curr.close < MA20 AND prev.close >= prevMA20 (crossed below) + fresh within 1.5 bars",
+    "short":      "Close SHORT: curr.close > MA20 AND prev.close <= prevMA20 (crossed above) + fresh within 1.5 bars",
+    "stop_loss":  "-3% unrealized PnL on margin — hard stop, live price, checked every 5s",
     "order_type": "MARKET — fills immediately at best available price",
     "logic": {
-      "check_interval": "Every 10 seconds",
-      "ma_consistency": "currMA and prevMA both computed from closed bars at their respective positions",
-      "stop_priority":  "Stop-loss checked FIRST (BingX unrealizedProfit/initialMargin), then MA crossover",
-      "stop_formula":   "pnlPct = unrealizedProfit / initialMargin (or priceDelta/entry * leverage as fallback)",
-      "tracking":       "Logs: price%, margin PnL%, USD PnL, daily total, W/L ratio",
-      "purpose":        "Clean MA crossover exits + hard -3% margin stop-loss"
+      "check_interval":  "Every 5 seconds",
+      "freshness":       "Exit signal candle must be within 1.5 candle durations — no acting on stale crossovers",
+      "ma_consistency":  "currMA and prevMA both computed from closed bars at their respective positions",
+      "stop_priority":   "Stop-loss checked FIRST (BingX unrealizedProfit/initialMargin), then MA crossover",
+      "stop_formula":    "pnlPct = unrealizedProfit / initialMargin (or priceDelta/entry * leverage fallback)",
+      "tracking":        "Logs: price%, margin PnL%, USD PnL, daily total, W/L ratio",
+      "purpose":         "Clean MA crossover exits — timely, fresh-signal only, with hard stop protection"
     }
   },
 
