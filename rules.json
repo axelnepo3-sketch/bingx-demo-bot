@@ -1,6 +1,6 @@
 {
   "strategy_name":            "MA SWING TRADER",
-  "version":                  "3.7",
+  "version":                  "3.8",
   "timeframe":                "1m",
   "timeframe_htf":            "5m",
 
@@ -23,11 +23,12 @@
   "blacklist": ["ETHFI-USDT", "DYM-USDT", "SUI-USDT", "WLD-USDT", "10000NAT-USDT", "LAB-USDT", "BSB-USDT"],
 
   "indicators": {
-    "MA20":    { "type": "SMA", "length": 20,  "source": "close", "timeframe": "1m" },
-    "SMA200":  { "type": "SMA", "length": 200, "source": "close", "timeframe": "1m" },
-    "MA20_5m": { "type": "SMA", "length": 20,  "source": "close", "timeframe": "5m",
+    "MA20":    { "type": "SMA", "length": 20, "source": "close", "timeframe": "1m" },
+    "SMA30":   { "type": "SMA", "length": 30, "source": "close", "timeframe": "1m",
+                 "purpose": "Trend bias — MA20 vs SMA30 determines long/short direction" },
+    "MA20_5m": { "type": "SMA", "length": 20, "source": "close", "timeframe": "5m",
                  "purpose": "MTF bias — 5m close vs 5m-MA20 must confirm 1m trend direction (trend entries only)" },
-    "ATR14_5m":{ "type": "ATR", "length": 14,  "timeframe": "5m",
+    "ATR14_5m":{ "type": "ATR", "length": 14, "timeframe": "5m",
                  "purpose": "BTC volatility proxy for market regime detection" }
   },
 
@@ -38,23 +39,24 @@
     "forming_bar":  "candles[-1] = FORMING bar — never used for signals",
     "last_closed":  "candles[-2] = last CLOSED bar (curr)",
     "prev_closed":  "candles[-3] = bar before last closed (prev)",
-    "ma_input":     "MA20/SMA200 computed over closed bars only",
+    "ma_input":     "MA20/SMA30 computed over closed bars only",
     "htf_bars":     "5m: 25 bars fetched, [-1] excluded as forming, [-2] is last closed 5m bar",
     "high_low":     "high and low parsed from klines for ATR calculation"
   },
 
   "bias_filter": {
-    "primary":   "1m MA20 vs 1m SMA200",
-    "secondary": "5m close vs 5m MA20 (MTF — trend entries only)",
-    "long":      "1m MA20 > SMA200 AND 5m close ≥ 5m-MA20 → LONG",
-    "short":     "1m MA20 < SMA200 AND 5m close ≤ 5m-MA20 → SHORT",
-    "neutral":   "MA20 == SMA200 OR 5m disagrees → skip trend entry",
-    "reversal":  "MTF skipped — counter-trend by design"
+    "primary":        "1m MA20 vs 1m SMA30",
+    "secondary":      "5m close vs 5m MA20 (MTF — trend entries only)",
+    "long":           "1m MA20 > SMA30 AND 5m close ≥ 5m-MA20 → LONG",
+    "short":          "1m MA20 < SMA30 AND 5m close ≤ 5m-MA20 → SHORT",
+    "neutral":        "MA20 == SMA30 OR 5m disagrees → skip trend entry",
+    "reversal":       "MTF skipped — counter-trend by design",
+    "sma30_note":     "SMA30 replaces SMA200 — shorter-term bias, more responsive crossovers, candle fetch shrinks from 204→34 bars"
   },
 
   "entry": {
-    "long":  "SWING LONG: GREEN + prev RED + close≥MA20 + within 0.5% + 1m-MA>SMA200 + 5m-close≥5m-MA20 + RSI<70",
-    "short": "SWING SHORT: RED + prev GREEN + close≤MA20 + within 0.5% + 1m-MA<SMA200 + 5m-close≤5m-MA20 + RSI>30",
+    "long":  "SWING LONG: GREEN + prev RED + close≥MA20 + within 0.5% + 1m-MA20>SMA30 + 5m-close≥5m-MA20 + RSI<70",
+    "short": "SWING SHORT: RED + prev GREEN + close≤MA20 + within 0.5% + 1m-MA20<SMA30 + 5m-close≤5m-MA20 + RSI>30",
     "order_type":          "MARKET",
     "max_ma_distance_pct": 0.005,
     "freshness_candles":   2
@@ -155,8 +157,8 @@
 
   "reversal_entry": {
     "enabled":              true,
-    "long_in_short_bias":   "1m MA20<SMA200 + GREEN + prev RED + close≥MA20 ±0.5% + RSI<70 + vol≥1× avg → LONG reversal",
-    "short_in_long_bias":   "1m MA20>SMA200 + RED + prev GREEN + close≤MA20 ±0.5% + RSI>30 + vol≥1× avg → SHORT reversal",
+    "long_in_short_bias":   "1m MA20<SMA30 + GREEN + prev RED + close≥MA20 ±0.5% + RSI<70 + vol≥1× avg → LONG reversal",
+    "short_in_long_bias":   "1m MA20>SMA30 + RED + prev GREEN + close≤MA20 ±0.5% + RSI>30 + vol≥1× avg → SHORT reversal",
     "volume_multiplier":    1.0,
     "volume_period":        20,
     "volume_baseline":      "20-bar avg over prior closed bars (forming bar AND curr bar excluded)",
@@ -216,7 +218,8 @@
   },
 
   "changelog": {
-    "v3.7": "HF AI Edition: auto-watchlist top-100 BingX USDT-perp (boot+midnight refresh), market regime detection (BTC 5m ATR+slope → BULL/BEAR/RANGING/VOLATILE), regime-based sizing (VOLATILE=50% RANGING=75% with-trend=100%), major-coin correlation cap (max 5 simultaneous), portfolio heat logging, 10 scan workers (was 5), ATR function, high/low in candles. Bundles v3.6: reversal vol 2×→1×, reversal stop -1.5%→-3%",
+    "v3.8": "Trend indicator changed: SMA200 → SMA30. MA20 vs SMA30 now determines long/short bias (shorter-term, more responsive crossovers). Candle fetch limit drops from 204 to 34 (faster API). trendGap threshold adjusted 0.5%→0.2% to reflect MA20/SMA30 proximity.",
+    "v3.7": "HF AI Edition: auto-watchlist top-100 BingX USDT-perp (boot+midnight refresh), market regime detection (BTC 5m ATR+slope → BULL/BEAR/RANGING/VOLATILE), regime-based sizing, major-coin correlation cap (max 5), portfolio heat logging, 10 scan workers, ATR function, high/low in candles. Bundles v3.6.",
     "v3.6": "Reversal vol 2×→1× (any vol≥avg qualifies), reversal stop -1.5%→-3% (unified with trend)",
     "v3.5": "Scalper→Swing Trader: 5m MTF, TP+8%, trail+4%, 5-min cooldown, scoring max 10pts",
     "v3.4": "Slot-fill scan 1.5s after exit",

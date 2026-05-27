@@ -1,5 +1,5 @@
 /**
- * BingX Demo Trading Bot — MA Swing Trader v3.7 (Hedge Fund AI Edition)
+ * BingX Demo Trading Bot — MA Swing Trader v3.8 (Hedge Fund AI Edition)
  * Target: $200/day | $50,000/year
  *
  * ═══════════════════════════════════════════════════════════════════════════
@@ -21,14 +21,14 @@
  *  ENTRY MODES
  * ═══════════════════════════════════════════════════════════════════════════
  *  A) TREND-FOLLOWING (primary)
- *     LONG : 1m MA20>SMA200 + 5m close≥5m-MA20 + GREEN candle + prev RED
+ *     LONG : 1m MA20>SMA30 + 5m close≥5m-MA20 + GREEN candle + prev RED
  *            + close≥MA20 ±0.5% + RSI<70
- *     SHORT: 1m MA20<SMA200 + 5m close≤5m-MA20 + RED candle + prev GREEN
+ *     SHORT: 1m MA20<SMA30 + 5m close≤5m-MA20 + RED candle + prev GREEN
  *            + close≤MA20 ±0.5% + RSI>30
  *
  *  B) COUNTER-TREND REVERSAL (vol ≥ 1× prior avg)
- *     LONG : MA20<SMA200 + same candle pattern + vol≥avg → reversal BUY
- *     SHORT: MA20>SMA200 + same candle pattern + vol≥avg → reversal SELL
+ *     LONG : MA20<SMA30 + same candle pattern + vol≥avg → reversal BUY
+ *     SHORT: MA20>SMA30 + same candle pattern + vol≥avg → reversal SELL
  *     MTF  : skipped (counter-trend by design)
  *     Size : 50% × regime multiplier
  *     Stop : -3% (unified with trend)
@@ -71,7 +71,7 @@ const BASE_URL        = "https://open-api-vst.bingx.com";
 const TIMEFRAME       = RULES.timeframe;                  // "1m"
 const TIMEFRAME_HTF   = "5m";                             // MTF bias
 const MA_PERIOD       = RULES.indicators.MA20.length;     // 20
-const SMA_PERIOD      = RULES.indicators.SMA200.length;   // 200
+const SMA_PERIOD      = RULES.indicators.SMA30.length;   //  30
 const HTF_MA_PERIOD   = 20;
 const HTF_LIMIT       = 25;
 const RSI_PERIOD      = 14;
@@ -285,12 +285,12 @@ function volAvg(candles, period = VOL_PERIOD) {
 }
 
 // ── Signal quality score (max 10) ─────────────────────────────────────────────
-function signalScore(distPct, bodyPct, ma20, sma200, rsiVal, mtfConfirmed) {
+function signalScore(distPct, bodyPct, ma20, sma30, rsiVal, mtfConfirmed) {
   let s = 0;
   if      (distPct < 0.001) s += 3; else if (distPct < 0.003) s += 2; else s += 1;
   if      (bodyPct > 0.002) s += 3; else if (bodyPct > 0.001) s += 2; else s += 1;
-  const trendGap = sma200 > 0 ? Math.abs(ma20 - sma200) / sma200 : 0;
-  if (trendGap > 0.005) s += 2; else s += 1;
+  const trendGap = sma30 > 0 ? Math.abs(ma20 - sma30) / sma30 : 0;
+  if (trendGap > 0.002) s += 2; else s += 1;  // 0.2% threshold fits MA20/SMA30 proximity
   if (mtfConfirmed) s += 1;
   if (rsiVal && rsiVal >= 40 && rsiVal <= 60) s += 1;
   return s;
@@ -333,12 +333,12 @@ function checkEntry(candles1m, candles5m = null) {
 
   const cc     = candles1m.slice(0, -1).map(c => c.close);
   const ma20   = sma(cc, MA_PERIOD);
-  const sma200 = sma(cc, SMA_PERIOD);
+  const sma30 = sma(cc, SMA_PERIOD);
   const rsiVal = rsi(cc);
-  if (!ma20 || !sma200) return null;
+  if (!ma20 || !sma30) return null;
 
-  const bullish = ma20 > sma200;
-  const bearish = ma20 < sma200;
+  const bullish = ma20 > sma30;
+  const bearish = ma20 < sma30;
   if (!bullish && !bearish) return null;
 
   const bodyPct = Math.abs(curr.close - curr.open) / curr.open;
@@ -391,8 +391,8 @@ function checkEntry(candles1m, candles5m = null) {
     mtfTag = "⚡no5m";
   }
 
-  const score = signalScore(distPct, bodyPct, ma20, sma200, rsiVal, mtfConfirmed);
-  return { signal, score, distPct, bodyPct, rsi: rsiVal, ma20, sma200, isReversal, volRatio, mtfConfirmed, mtfTag };
+  const score = signalScore(distPct, bodyPct, ma20, sma30, rsiVal, mtfConfirmed);
+  return { signal, score, distPct, bodyPct, rsi: rsiVal, ma20, sma30, isReversal, volRatio, mtfConfirmed, mtfTag };
 }
 
 // ── Exit signal ────────────────────────────────────────────────────────────────
@@ -1002,7 +1002,7 @@ http.createServer((req, res) => {
       scoring:             "max 10pts: distance(1-3)+body(1-3)+trend-gap(1-2)+MTF(+1)+RSI-zone(+1)"
     },
     entryModes: {
-      trend:    `LONG: 1m-MA>SMA200 + 5m-close≥5m-MA20 | SHORT: 1m-MA<SMA200 + 5m-close≤5m-MA20`,
+      trend:    `LONG: 1m-MA>SMA30 + 5m-close≥5m-MA20 | SHORT: 1m-MA<SMA30 + 5m-close≤5m-MA20`,
       reversal: `counter-trend vol≥${REVERSAL_VOL_MULT}× avg | 50%×regime size | stop -${REVERSAL_STOP_PCT*100}%`
     },
     riskManagement: {
