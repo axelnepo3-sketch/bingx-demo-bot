@@ -5,11 +5,11 @@
  * Professional risk management:
  *   • Take profit  +6% PnL on margin  (2:1 R:R vs -3% stop)
  *   • Trailing stop activates at +3%, trails 2% below peak
- *   • Daily profit target $200 → halt new entries when reached
- *   • Daily loss limit   $100 → halt trading for the day
+ *   • Daily profit target $200 — tracked/displayed only, NEVER halts trading
  *   • Win-rate circuit breaker: pause 30 min if WR < 40% (min 10 trades)
  *   • Signal quality scoring → position size 50% / 75% / 100%
  *   • RSI filter: no LONG if RSI ≥ 70, no SHORT if RSI ≤ 30
+ *   • Bot runs 24/7 — no daily loss limit, no profit cap on entries
  */
 
 import axios from "axios";
@@ -427,16 +427,6 @@ async function scanEntry() {
     checkDailyReset();
     stats.lastScan = new Date().toISOString();
 
-    // ── DAILY PROFIT TARGET ────────────────────────────────────────────────────
-    if (perf.dailyPnl >= DAILY_TARGET) {
-      log(`🎯 Daily target $${DAILY_TARGET} reached ($${perf.dailyPnl.toFixed(2)}) — no new entries today`);
-      return;
-    }
-    // ── DAILY LOSS LIMIT ───────────────────────────────────────────────────────
-    if (perf.dailyPnl <= -DAILY_LOSS_LIM) {
-      log(`🛑 Daily loss limit -$${DAILY_LOSS_LIM} hit ($${perf.dailyPnl.toFixed(2)}) — halting entries today`);
-      return;
-    }
     // ── WIN-RATE CIRCUIT BREAKER ───────────────────────────────────────────────
     if (checkCircuitBreaker()) return;
 
@@ -645,8 +635,7 @@ http.createServer((req, res) => {
       takeProfit:    `+${TAKE_PROFIT_PCT * 100}% margin`,
       trailActivate: `+${TRAIL_ON_PCT * 100}% margin`,
       trailDistance: `${TRAIL_DIST_PCT * 100}% from peak`,
-      dailyTarget:   `$${DAILY_TARGET}`,
-      dailyLossLim:  `-$${DAILY_LOSS_LIM}`,
+      dailyTarget:   `$${DAILY_TARGET} (tracking only — no halt)`,
       circuitBreaker: paused || "inactive"
     },
     config: {
@@ -670,7 +659,7 @@ log(`   Timeframe  : ${TIMEFRAME} | MA${MA_PERIOD} | SMA${SMA_PERIOD} | RSI${RSI
 log(`   Entry      : within ${MAX_MA_DIST_PCT*100}% of MA20 | 2-candle window | RSI filter | scored`);
 log(`   Stop-loss  : -${STOP_LOSS_PCT*100}%  Take-profit: +${TAKE_PROFIT_PCT*100}%  (R:R ${TAKE_PROFIT_PCT/STOP_LOSS_PCT}:1)`);
 log(`   Trail stop : activates at +${TRAIL_ON_PCT*100}%, trails ${TRAIL_DIST_PCT*100}% below peak`);
-log(`   Daily limts: profit target $${DAILY_TARGET} | loss limit -$${DAILY_LOSS_LIM}`);
+log(`   Daily target: $${DAILY_TARGET}/day (tracking only — bot trades 24/7, no halt)`);
 log(`   Circuit brk: win rate < ${WR_MIN*100}% (min ${WR_MIN_TRADES} trades) → pause ${WR_PAUSE_MS/60000}min`);
 log(`   Watchlist  : ${WATCHLIST.length} symbols | ${BLACKLIST.size} blacklisted`);
 log(`   Timing     : scan=${SCAN_MS/1000}s | exit=${EXIT_POLL_MS/1000}s | fetch=${FETCH_DELAY_MS}ms | order=${ORDER_DELAY_MS}ms`);
