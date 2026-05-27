@@ -1,53 +1,55 @@
 /**
- * BingX Demo Trading Bot — MA Swing Trader v3.5 (Hedge Fund Edition)
+ * BingX Demo Trading Bot — MA Swing Trader v3.7 (Hedge Fund AI Edition)
  * Target: $200/day | $50,000/year
  *
- * STRATEGY: Swing trading on 1m candles with 5m multi-timeframe (MTF) bias
+ * ═══════════════════════════════════════════════════════════════════════════
+ *  HEDGE FUND AI AGENT BEHAVIORS
+ * ═══════════════════════════════════════════════════════════════════════════
+ *  1. Auto-watchlist     : Top 100 BingX USDT-perp by 24h volume, fetched on
+ *                          boot and refreshed every midnight UTC
+ *  2. Market regime      : BTC 5m ATR + MA20 slope → BULL_TREND / BEAR_TREND /
+ *                          RANGING / VOLATILE — updated every 5 min
+ *  3. Regime sizing      : VOLATILE=50% · RANGING=75% · against-trend=75% · with-trend=100%
+ *  4. Correlation cap    : Major coins (BTC/ETH/SOL/BNB/…) max 5 positions
+ *  5. Portfolio heat     : Total margin exposure % logged on every scan
+ *  6. MTF bias           : 5m MA20 must confirm 1m entry (trend entries only)
+ *  7. Signal scoring     : max 10pts (distance+body+trend+MTF+RSI-zone) → size
+ *  8. Smart cooldown     : 5-min re-entry block per symbol after stop-loss
+ *  9. Slot-fill scan     : Immediate re-scan 1.5s after any exit frees a slot
  *
- * TWO entry modes per scan:
+ * ═══════════════════════════════════════════════════════════════════════════
+ *  ENTRY MODES
+ * ═══════════════════════════════════════════════════════════════════════════
+ *  A) TREND-FOLLOWING (primary)
+ *     LONG : 1m MA20>SMA200 + 5m close≥5m-MA20 + GREEN candle + prev RED
+ *            + close≥MA20 ±0.5% + RSI<70
+ *     SHORT: 1m MA20<SMA200 + 5m close≤5m-MA20 + RED candle + prev GREEN
+ *            + close≤MA20 ±0.5% + RSI>30
  *
- *   A) TREND-FOLLOWING (primary, no volume required)
- *      LONG : MA20 > SMA200 (1m) + 5m close ≥ 5m-MA20 (MTF) + GREEN candle
- *             + prev RED + close ≥ MA20 ± 0.5% + RSI < 70
- *      SHORT: MA20 < SMA200 (1m) + 5m close ≤ 5m-MA20 (MTF) + RED candle
- *             + prev GREEN + close ≤ MA20 ± 0.5% + RSI > 30
+ *  B) COUNTER-TREND REVERSAL (vol ≥ 1× prior avg)
+ *     LONG : MA20<SMA200 + same candle pattern + vol≥avg → reversal BUY
+ *     SHORT: MA20>SMA200 + same candle pattern + vol≥avg → reversal SELL
+ *     MTF  : skipped (counter-trend by design)
+ *     Size : 50% × regime multiplier
+ *     Stop : -3% (unified with trend)
  *
- *   B) COUNTER-TREND REVERSAL (requires ≥ 2× prior 20-bar avg volume)
- *      LONG : MA20 < SMA200 + same candle rules + volume surge → reversal BUY
- *      SHORT: MA20 > SMA200 + same candle rules + volume surge → reversal SELL
- *      MTF  : skipped — reversals are counter-trend by design
- *      Size : capped at 50% regardless of signal score
- *      Stop : -1.5% margin PnL (tighter than trend's -3%)
+ * ═══════════════════════════════════════════════════════════════════════════
+ *  EXITS
+ * ═══════════════════════════════════════════════════════════════════════════
+ *  Priority: stop-loss(-3%) → take-profit(+8%) → trail(+4%/−2%) → MA20-cross
  *
- * AI Agent behaviors:
- *   • Multi-indicator confluence scoring (distance + body + trend gap + MTF + RSI)
- *   • Smart re-entry cooldown: 5-min block on any symbol after a stop-loss fires
- *   • Signal quality score drives position size (50% / 75% / 100%)
- *
- * Risk management:
- *   • Stop-loss      -3%  trend / -1.5% reversal  (hard, checked every 5s)
- *   • Take-profit    +8%  PnL on margin (swing target — was +6%)
- *   • Trailing stop  activates at +4%, trails 2% below peak (was +3%/2%)
- *   • Win-rate circuit breaker: pause 30 min if WR < 40% (min 10 trades)
- *   • $200/day target — tracked only, NEVER halts trading
- *   • Bot runs 24/7 — no daily loss limit, no entry cap
- *
- * v3.5 changes (Scalper → Swing Trader):
- *   1. Multi-timeframe (MTF): 5m MA20 must align with 1m signal for trend entries
- *   2. Take profit raised +6% → +8% | Trail activates +3% → +4% (longer holds)
- *   3. Smart re-entry cooldown: 5-min block per symbol after stop-loss fires
- *   4. Signal scoring enhanced: MTF bonus (+1) + RSI positioning bonus (+1) → max 10
- *   5. Slot-fill scan: immediate re-scan 1.5s after any exit frees a slot (v3.4)
- *
- * v3.4 fix:
- *   6. Slot-fill scan: whenever any exit fires, trigger fresh scanEntry() 1.5s later
- *
- * v3.3 bug fixes:
- *   7.  volAvg excludes curr bar (was inflating denominator, ratio was understated)
- *   8.  Parallel candle fetch (5 concurrent) — scan drops from ~20s to ~4s
- *   9.  pollExits 2-pass: stop/TP/trail first (no extra API), then parallel MA20 fetch
- *   10. livePrice only fetched when an exit actually triggers
- *   11. getCandles 1 retry on failure
+ * ═══════════════════════════════════════════════════════════════════════════
+ *  CHANGELOG
+ * ═══════════════════════════════════════════════════════════════════════════
+ *  v3.7: HF AI Edition — auto-watchlist 100 symbols, market regime detection,
+ *        regime-based sizing, major coin correlation cap, portfolio heat log,
+ *        10 scan workers (was 5), ATR calculation, high/low in candles
+ *  v3.6: Reversal vol 2×→1× (any vol≥avg), reversal stop -1.5%→-3% (unified)
+ *  v3.5: Scalper→Swing Trader, 5m MTF, TP+8%, trail+4%, 5-min cooldown,
+ *        scoring max 10pts
+ *  v3.4: Slot-fill scan 1.5s after exit
+ *  v3.3: volAvg fix, parallel 5-worker fetch, 2-pass pollExits, livePrice
+ *        on-demand, getCandles 1-retry
  */
 
 import axios from "axios";
@@ -64,14 +66,14 @@ function loadRules() {
 }
 const RULES = loadRules();
 
-// ── Config ─────────────────────────────────────────────────────────────────────
+// ── Static Config ──────────────────────────────────────────────────────────────
 const BASE_URL        = "https://open-api-vst.bingx.com";
-const TIMEFRAME       = RULES.timeframe;                  // "1m" — entry trigger
-const TIMEFRAME_HTF   = "5m";                             // MTF bias timeframe
+const TIMEFRAME       = RULES.timeframe;                  // "1m"
+const TIMEFRAME_HTF   = "5m";                             // MTF bias
 const MA_PERIOD       = RULES.indicators.MA20.length;     // 20
 const SMA_PERIOD      = RULES.indicators.SMA200.length;   // 200
-const HTF_MA_PERIOD   = 20;                               // 5m MA20 for bias
-const HTF_LIMIT       = 25;                               // candle limit for 5m fetch
+const HTF_MA_PERIOD   = 20;
+const HTF_LIMIT       = 25;
 const RSI_PERIOD      = 14;
 const VOL_PERIOD      = 20;
 const LEVERAGE        = RULES.position_sizing.leverage;
@@ -87,30 +89,45 @@ const EXIT_POLL_MS    = RULES.limits.exit_poll_ms        || 5000;
 const MIN_BODY_PCT    = 0.0002;
 const MAX_MA_DIST_PCT = RULES.entry?.max_ma_distance_pct || 0.005;
 
-// How many candle fetches run simultaneously
-const CANDLE_CONCURRENCY     = 5;    // 1m entries + exit MA check
-const CANDLE_CONCURRENCY_HTF = 3;    // 5m HTF bias (lower to avoid rate limits)
+// Watchlist
+const MAX_WATCHLIST        = 100;
+const MIN_24H_VOL_USDT     = 1_000_000;   // $1M minimum daily volume
 
-// ── Risk Management Config ─────────────────────────────────────────────────────
+// Concurrency
+const CANDLE_CONCURRENCY     = 10;   // 1m parallel workers
+const CANDLE_CONCURRENCY_HTF = 5;    // 5m parallel workers
+
+// ── Risk Management ────────────────────────────────────────────────────────────
 const rm              = RULES.risk_management || {};
 const STOP_LOSS_PCT   = rm.stop_loss_pct           || 0.03;
-const TAKE_PROFIT_PCT = rm.take_profit_pct         || 0.08;   // +8% (swing target)
-const TRAIL_ON_PCT    = rm.trail_activate_pct      || 0.04;   // activates at +4%
-const TRAIL_DIST_PCT  = rm.trail_distance_pct      || 0.02;   // trails 2%
+const TAKE_PROFIT_PCT = rm.take_profit_pct         || 0.08;
+const TRAIL_ON_PCT    = rm.trail_activate_pct      || 0.04;
+const TRAIL_DIST_PCT  = rm.trail_distance_pct      || 0.02;
 const DAILY_TARGET    = rm.daily_profit_target_usdt || 200;
 const WR_MIN          = rm.win_rate_min             || 0.40;
 const WR_MIN_TRADES   = rm.win_rate_min_trades      || 10;
-const WR_PAUSE_MS     = (rm.win_rate_pause_minutes  || 30) * 60_000;
-const COOLDOWN_MS     = (rm.stop_cooldown_minutes   || 5)  * 60_000;  // 5-min re-entry block
+const WR_PAUSE_MS     = (rm.win_rate_pause_minutes  || 30)  * 60_000;
+const COOLDOWN_MS     = (rm.stop_cooldown_minutes   || 5)   * 60_000;
 
 // ── Reversal Config ────────────────────────────────────────────────────────────
 const rev = RULES.reversal_entry || {};
-const REVERSAL_VOL_MULT  = rev.volume_multiplier || 2.0;
-const REVERSAL_STOP_PCT  = rev.stop_loss_pct     || 0.015;
-const REVERSAL_SIZE_MULT = rev.size_multiplier   || 0.50;
+const REVERSAL_VOL_MULT  = rev.volume_multiplier ?? 1.0;   // 1× = vol ≥ avg
+const REVERSAL_STOP_PCT  = rev.stop_loss_pct     || 0.03;  // unified -3%
+const REVERSAL_SIZE_MULT = rev.size_multiplier   || 0.50;  // 50% base size
+
+// ── Hedge Fund: Correlation Control ───────────────────────────────────────────
+// Major coins are highly correlated with BTC — cap simultaneous exposure
+const MAJOR_COINS = new Set([
+  "BTC-USDT", "ETH-USDT", "SOL-USDT", "BNB-USDT", "AVAX-USDT",
+  "ADA-USDT", "XRP-USDT", "NEAR-USDT", "TRX-USDT", "BCH-USDT",
+  "LTC-USDT", "DOGE-USDT", "DOT-USDT", "LINK-USDT", "MATIC-USDT",
+  "INJ-USDT", "APT-USDT", "ARB-USDT", "OP-USDT",   "ATOM-USDT",
+  "FIL-USDT", "ICP-USDT", "HBAR-USDT","SUI-USDT",  "WLD-USDT"
+]);
+const MAX_MAJOR_POSITIONS = RULES.hf_agent?.max_major_positions || 5;
 
 const BLACKLIST = new Set(RULES.blacklist || []);
-const WATCHLIST = (RULES.watchlist || []).filter(s => !BLACKLIST.has(s));
+let   WATCHLIST = (RULES.watchlist || []).filter(s => !BLACKLIST.has(s));  // replaced on boot
 const PORT      = process.env.PORT || 3000;
 
 const CANDLE_MS = {
@@ -156,13 +173,13 @@ function buildQS(params, secret) {
 async function GET(path, params = {}) {
   const { k, s } = creds();
   const qs = buildQS({ ...params, timestamp: bingxNow() }, s);
-  const r  = await axios.get(`${BASE_URL}${path}?${qs}`, { headers: { "X-BX-APIKEY": k }, timeout: 5000 });
+  const r  = await axios.get(`${BASE_URL}${path}?${qs}`, { headers: { "X-BX-APIKEY": k }, timeout: 8000 });
   return r.data;
 }
 async function POST(path, params = {}) {
   const { k, s } = creds();
   const qs = buildQS({ ...params, timestamp: bingxNow() }, s);
-  const r  = await axios.post(`${BASE_URL}${path}?${qs}`, null, { headers: { "X-BX-APIKEY": k }, timeout: 5000 });
+  const r  = await axios.post(`${BASE_URL}${path}?${qs}`, null, { headers: { "X-BX-APIKEY": k }, timeout: 8000 });
   return r.data;
 }
 
@@ -178,12 +195,16 @@ function log(msg) {
 }
 
 // ── Shared state ───────────────────────────────────────────────────────────────
-const peakPnl           = new Map();   // peak PnL per position (trailing stop)
-const closingPositions  = new Set();   // in-flight closes (prevent double-exit)
-const reversalPositions = new Set();   // counter-trend positions (-1.5% stop)
-const stopCooldowns     = new Map();   // symbol → cooldown end timestamp (5-min after stop-loss)
+const peakPnl           = new Map();   // peak PnL per position
+const closingPositions  = new Set();   // in-flight closes
+const reversalPositions = new Set();   // counter-trend positions (for log tagging)
+const stopCooldowns     = new Map();   // symbol → cooldown end timestamp
 let   winRatePauseUntil = 0;
-let   fillScanTimer     = null;        // scheduled slot-fill scan after exit
+let   fillScanTimer     = null;
+
+// ── HF: Market Regime ─────────────────────────────────────────────────────────
+let marketRegime    = "UNKNOWN";   // BULL_TREND | BEAR_TREND | RANGING | VOLATILE
+let regimeUpdatedAt = 0;
 
 // ── Daily reset ────────────────────────────────────────────────────────────────
 let tradeToday = 0;
@@ -203,6 +224,9 @@ function checkDailyReset() {
     reversalPositions.clear();
     stopCooldowns.clear();
     log(`📅 Daily reset — all counters cleared`);
+    // Refresh watchlist and regime on new day (non-blocking)
+    refreshWatchlist().catch(e => log(`WARN: midnight watchlist refresh failed: ${e.message}`));
+    updateMarketRegime().catch(e => log(`WARN: midnight regime update failed: ${e.message}`));
   }
 }
 
@@ -238,8 +262,21 @@ function rsi(closes, period = RSI_PERIOD) {
   return 100 - (100 / (1 + avgG / avgL));
 }
 
-// volAvg excludes BOTH forming bar ([-1]) AND curr bar ([-2]) — curr excluded so
-// it doesn't inflate its own baseline (a 10× spike must read as 10×, not 6.9×)
+// ATR (Average True Range) — requires high/low in candles
+function atr(candles, period = 14) {
+  if (candles.length < period + 1) return null;
+  const recent = candles.slice(-(period + 1));
+  let trSum = 0;
+  for (let i = 1; i < recent.length; i++) {
+    const h   = recent[i].high  ?? recent[i].close;
+    const l   = recent[i].low   ?? recent[i].close;
+    const pc  = recent[i - 1].close;
+    trSum += Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc));
+  }
+  return trSum / period;
+}
+
+// volAvg excludes forming bar AND curr bar to prevent self-inflation of baseline
 function volAvg(candles, period = VOL_PERIOD) {
   const prior = candles.slice(0, -2);
   if (prior.length < period) return null;
@@ -247,61 +284,53 @@ function volAvg(candles, period = VOL_PERIOD) {
   return vols.reduce((a, b) => a + b, 0) / period;
 }
 
-// ── Signal quality score (max 10) → position size multiplier ──────────────────
-//   Points breakdown:
-//     Distance from MA20 : 1–3 pts (closer = better)
-//     Body size (momentum): 1–3 pts (bigger = stronger conviction)
-//     Trend gap (MA20 vs SMA200): 1–2 pts (wider = stronger trend)
-//     MTF confirmation   : +1 pt  (5m MA20 agrees with signal direction)
-//     RSI positioning    : +1 pt  (RSI 40–60 = not extended, clean entry zone)
+// ── Signal quality score (max 10) ─────────────────────────────────────────────
 function signalScore(distPct, bodyPct, ma20, sma200, rsiVal, mtfConfirmed) {
   let s = 0;
-
-  // Distance from MA20 (closest bounce = highest score)
-  if      (distPct < 0.001) s += 3;
-  else if (distPct < 0.003) s += 2;
-  else                      s += 1;
-
-  // Body size (momentum strength)
-  if      (bodyPct > 0.002) s += 3;
-  else if (bodyPct > 0.001) s += 2;
-  else                      s += 1;
-
-  // Trend gap strength (further apart = cleaner trend)
+  if      (distPct < 0.001) s += 3; else if (distPct < 0.003) s += 2; else s += 1;
+  if      (bodyPct > 0.002) s += 3; else if (bodyPct > 0.001) s += 2; else s += 1;
   const trendGap = sma200 > 0 ? Math.abs(ma20 - sma200) / sma200 : 0;
   if (trendGap > 0.005) s += 2; else s += 1;
-
-  // MTF confirmation bonus (+1 if 5m MA20 aligns with signal direction)
   if (mtfConfirmed) s += 1;
-
-  // RSI in ideal zone (+1 if RSI between 40–60, not extended)
   if (rsiVal && rsiVal >= 40 && rsiVal <= 60) s += 1;
-
   return s;
 }
 
 function sizeMultiplier(score) {
-  if (score >= 8) return 1.00;   // strong confluence
-  if (score >= 6) return 0.75;   // moderate confluence
-  return 0.50;                   // weak confluence
+  if (score >= 8) return 1.00;
+  if (score >= 6) return 0.75;
+  return 0.50;
+}
+
+// ── HF: Regime size multiplier ────────────────────────────────────────────────
+// Regime adjusts position size on top of signal score multiplier
+// VOLATILE    → 50% (MA bounces unreliable in high chop)
+// RANGING     → 75% (low conviction, sideways market)
+// BULL_TREND  → 100% LONG / 75% SHORT (favor the trend)
+// BEAR_TREND  → 100% SHORT / 75% LONG (favor the trend)
+// UNKNOWN     → 100% (no penalty for detection failure)
+function regimeSizeMultiplier(signal) {
+  switch (marketRegime) {
+    case "VOLATILE":   return 0.50;
+    case "RANGING":    return 0.75;
+    case "BULL_TREND": return signal === "LONG"  ? 1.00 : 0.75;
+    case "BEAR_TREND": return signal === "SHORT" ? 1.00 : 0.75;
+    default:           return 1.00;
+  }
 }
 
 // ── Entry signal ───────────────────────────────────────────────────────────────
-// candles1m : 1m candle array (primary signals)
-// candles5m : 5m candle array (MTF bias filter, optional)
 function checkEntry(candles1m, candles5m = null) {
   if (candles1m.length < SMA_PERIOD + 3) return null;
 
-  const curr = candles1m[candles1m.length - 2];  // last closed bar
-  const prev = candles1m[candles1m.length - 3];  // bar before last closed
+  const curr = candles1m[candles1m.length - 2];
+  const prev = candles1m[candles1m.length - 3];
 
-  // Freshness check — signal must be from last 2 closed bars
   const candleTime = curr.time < 1_000_000_000_000 ? curr.time * 1000 : curr.time;
   const signalAge  = bingxNow() - (candleTime + CANDLE_MS);
-  if (signalAge < 0)              return null;  // bar not yet closed
-  if (signalAge >= CANDLE_MS * 2) return null;  // too old (3rd+ candle)
+  if (signalAge < 0)              return null;
+  if (signalAge >= CANDLE_MS * 2) return null;
 
-  // 1m indicators (computed over closed bars only — exclude forming bar)
   const cc     = candles1m.slice(0, -1).map(c => c.close);
   const ma20   = sma(cc, MA_PERIOD);
   const sma200 = sma(cc, SMA_PERIOD);
@@ -310,13 +339,11 @@ function checkEntry(candles1m, candles5m = null) {
 
   const bullish = ma20 > sma200;
   const bearish = ma20 < sma200;
-  if (!bullish && !bearish) return null;  // MA20 == SMA200 → no clear trend
+  if (!bullish && !bearish) return null;
 
-  // Minimum body size (filter noise / doji candles)
   const bodyPct = Math.abs(curr.close - curr.open) / curr.open;
   if (bodyPct < MIN_BODY_PCT) return null;
 
-  // Proximity to MA20 (no chasing — must be within 0.5%)
   const distPct = Math.abs(curr.close - ma20) / ma20;
   if (distPct > MAX_MA_DIST_PCT) return null;
 
@@ -324,13 +351,11 @@ function checkEntry(candles1m, candles5m = null) {
   const currRed   = curr.close < curr.open;
   const prevRed   = prev.close < prev.open;
   const prevGreen = prev.close > prev.open;
-
   const rsiOK_long  = !rsiVal || rsiVal < 70;
   const rsiOK_short = !rsiVal || rsiVal > 30;
 
-  // Volume for reversal check (excludes curr bar from baseline)
-  const avgVol  = volAvg(candles1m);
-  const currVol = curr.volume || 0;
+  const avgVol   = volAvg(candles1m);
+  const currVol  = curr.volume || 0;
   const volRatio = avgVol && currVol > 0 ? currVol / avgVol : null;
 
   let signal     = null;
@@ -340,7 +365,7 @@ function checkEntry(candles1m, candles5m = null) {
   if (bullish && currGreen && prevRed   && curr.close >= ma20 && rsiOK_long)  signal = "LONG";
   if (bearish && currRed   && prevGreen && curr.close <= ma20 && rsiOK_short) signal = "SHORT";
 
-  // MODE B: counter-trend reversal (≥ 2× prior avg volume)
+  // MODE B: counter-trend reversal (vol ≥ 1× prior avg)
   if (!signal && avgVol && currVol >= avgVol * REVERSAL_VOL_MULT) {
     if (bearish && currGreen && prevRed   && curr.close >= ma20 && rsiOK_long)  { signal = "LONG";  isReversal = true; }
     if (bullish && currRed   && prevGreen && curr.close <= ma20 && rsiOK_short) { signal = "SHORT"; isReversal = true; }
@@ -348,24 +373,21 @@ function checkEntry(candles1m, candles5m = null) {
 
   if (!signal) return null;
 
-  // ── MTF filter: 5m MA20 bias check (trend-following entries only) ──────────
-  // Reversals are counter-trend by definition — skip MTF for them
+  // MTF filter: 5m MA20 must align with signal (trend entries only)
   let mtfConfirmed = false;
   let mtfTag       = "n/a";
 
   if (!isReversal && candles5m && candles5m.length >= HTF_MA_PERIOD + 2) {
-    const cc5m    = candles5m.slice(0, -1).map(c => c.close);  // exclude forming 5m bar
-    const ma5m    = sma(cc5m, HTF_MA_PERIOD);
-    const last5m  = cc5m[cc5m.length - 1];
-
+    const cc5m   = candles5m.slice(0, -1).map(c => c.close);
+    const ma5m   = sma(cc5m, HTF_MA_PERIOD);
+    const last5m = cc5m[cc5m.length - 1];
     if (ma5m) {
-      if (signal === "LONG"  && last5m < ma5m) return null;  // 5m bearish → skip LONG entry
-      if (signal === "SHORT" && last5m > ma5m) return null;  // 5m bullish → skip SHORT entry
+      if (signal === "LONG"  && last5m < ma5m) return null;
+      if (signal === "SHORT" && last5m > ma5m) return null;
       mtfConfirmed = true;
       mtfTag       = "✅5m";
     }
   } else if (!isReversal) {
-    // 5m data unavailable — allow entry but note MTF unchecked
     mtfTag = "⚡no5m";
   }
 
@@ -373,11 +395,11 @@ function checkEntry(candles1m, candles5m = null) {
   return { signal, score, distPct, bodyPct, rsi: rsiVal, ma20, sma200, isReversal, volRatio, mtfConfirmed, mtfTag };
 }
 
-// ── Exit signal (no freshness guard — exits must always fire) ──────────────────
+// ── Exit signal ────────────────────────────────────────────────────────────────
 function checkExit(candles, side) {
   if (candles.length < SMA_PERIOD + 3) return false;
-  const cc     = candles.slice(0, -1).map(c => c.close);
-  const ccPrev = cc.slice(0, -1);
+  const cc       = candles.slice(0, -1).map(c => c.close);
+  const ccPrev   = cc.slice(0, -1);
   const currClose = cc[cc.length - 1];
   const prevClose = ccPrev[ccPrev.length - 1];
   const currMA    = sma(cc,     MA_PERIOD);
@@ -389,7 +411,6 @@ function checkExit(candles, side) {
 }
 
 // ── Market data ────────────────────────────────────────────────────────────────
-// 1 retry on transient failure (timeout, 429, network blip)
 async function getCandles(symbol, interval = TIMEFRAME, limit = SMA_PERIOD + 4) {
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
@@ -401,6 +422,8 @@ async function getCandles(symbol, interval = TIMEFRAME, limit = SMA_PERIOD + 4) 
         return {
           time:   t,
           open:   parseFloat(c.open),
+          high:   parseFloat(c.high   || c.close),
+          low:    parseFloat(c.low    || c.close),
           close:  parseFloat(c.close),
           volume: parseFloat(c.volume || 0)
         };
@@ -436,9 +459,7 @@ async function getLivePrice(symbol) {
   } catch { return 0; }
 }
 
-// Parallel candle fetcher — N concurrent workers
-// interval = "1m" for entry signals, "5m" for MTF bias
-// concurrency defaults to CANDLE_CONCURRENCY for 1m, CANDLE_CONCURRENCY_HTF for 5m
+// Parallel candle fetcher — concurrency auto-selects by timeframe
 async function fetchCandlesBatch(symbols, interval = TIMEFRAME, limit = SMA_PERIOD + 4) {
   const results    = new Map();
   const queue      = [...symbols];
@@ -458,7 +479,85 @@ async function fetchCandlesBatch(symbols, interval = TIMEFRAME, limit = SMA_PERI
   return results;
 }
 
-// ── Position sizing — dynamic decimal precision by price tier ──────────────────
+// ── HF: Auto-Watchlist ─────────────────────────────────────────────────────────
+// Fetch top N USDT perpetual futures by 24h USD volume from BingX
+async function fetchTopSymbols(n = MAX_WATCHLIST) {
+  try {
+    const d = await GET("/openApi/swap/v2/quote/ticker");
+    const tickers = Array.isArray(d?.data) ? d.data : [];
+    const filtered = tickers
+      .filter(t => t.symbol && t.symbol.endsWith("-USDT") && !BLACKLIST.has(t.symbol))
+      .filter(t => parseFloat(t.quoteVolume || t.volume24H || t.volume || 0) >= MIN_24H_VOL_USDT)
+      .sort((a, b) =>
+        parseFloat(b.quoteVolume || b.volume24H || b.volume || 0) -
+        parseFloat(a.quoteVolume || a.volume24H || a.volume || 0)
+      )
+      .slice(0, n)
+      .map(t => t.symbol);
+
+    if (filtered.length < 10) throw new Error(`only ${filtered.length} symbols returned — API may differ`);
+    return filtered;
+  } catch (e) {
+    log(`WARN: auto-watchlist fetch failed (${e.message}) — using rules.json fallback`);
+    return (RULES.watchlist || []).filter(s => !BLACKLIST.has(s));
+  }
+}
+
+async function refreshWatchlist() {
+  const oldList = [...WATCHLIST];
+  const fresh   = await fetchTopSymbols(MAX_WATCHLIST);
+  WATCHLIST     = fresh;
+  const added   = fresh.filter(s => !oldList.includes(s));
+  const removed = oldList.filter(s => !fresh.includes(s));
+  log(`📋 Watchlist refreshed: ${WATCHLIST.length} symbols (top ${MAX_WATCHLIST} BingX USDT-perp by 24h vol, min $${(MIN_24H_VOL_USDT/1e6).toFixed(0)}M)`);
+  if (added.length   > 0) log(`   ✅ Added   (${added.length}):   ${added.slice(0, 8).join(", ")}${added.length > 8 ? "…" : ""}`);
+  if (removed.length > 0) log(`   ❌ Removed (${removed.length}): ${removed.slice(0, 8).join(", ")}${removed.length > 8 ? "…" : ""}`);
+}
+
+// ── HF: Market Regime Detection ───────────────────────────────────────────────
+// Uses BTC 5m candles (ATR for volatility + MA20 slope for direction)
+// ATR > 0.3%/bar → VOLATILE | slope > 0.05% → BULL/BEAR_TREND | else RANGING
+async function updateMarketRegime() {
+  try {
+    const candles = await getCandles("BTC-USDT", "5m", 40);
+    if (candles.length < 25) { marketRegime = "UNKNOWN"; return; }
+
+    const closed = candles.slice(0, -1);  // exclude forming bar
+    const cc     = closed.map(c => c.close);
+
+    // Volatility: ATR relative to price
+    const atrVal  = atr(closed, 14);
+    const btcPx   = cc[cc.length - 1];
+    const atrPct  = atrVal && btcPx ? atrVal / btcPx : 0;
+
+    // Trend: MA20 slope over last 5 closed bars
+    const maNow   = sma(cc, 20);
+    const ma5ago  = sma(cc.slice(0, -5), 20);
+    const slope   = maNow && ma5ago ? (maNow - ma5ago) / ma5ago : 0;
+
+    const prev = marketRegime;
+
+    if (atrPct > 0.003) {
+      marketRegime = "VOLATILE";
+    } else if (Math.abs(slope) > 0.0005) {
+      marketRegime = slope > 0 ? "BULL_TREND" : "BEAR_TREND";
+    } else {
+      marketRegime = "RANGING";
+    }
+
+    regimeUpdatedAt = Date.now();
+
+    if (prev !== marketRegime) {
+      const regimeEmoji = { BULL_TREND: "🟢", BEAR_TREND: "🔴", RANGING: "🟡", VOLATILE: "⚡" };
+      log(`${regimeEmoji[marketRegime] || "⚪"} Regime → ${marketRegime} | BTC ATR:${(atrPct*100).toFixed(3)}%/bar | MA slope:${(slope*100).toFixed(3)}%`);
+    }
+  } catch (e) {
+    log(`WARN: regime detection failed — ${e.message}`);
+    marketRegime = "UNKNOWN";
+  }
+}
+
+// ── Position sizing ────────────────────────────────────────────────────────────
 function calcQty(bal, price, multiplier = 1.0) {
   if (!bal || !price) return 0;
   const margin   = Math.min(bal * RISK_PCT, MAX_MARGIN) * multiplier;
@@ -474,14 +573,15 @@ function calcQty(bal, price, multiplier = 1.0) {
 }
 
 // ── Place entry ────────────────────────────────────────────────────────────────
-async function placeEntry(symbol, signal, score, bal, isReversal = false) {
+async function placeEntry(symbol, signal, score, bal, isReversal = false, regimeAdj = 1.0) {
   try {
     const price = await getLivePrice(symbol);
     if (!price) { log(`SKIP ${symbol} — no live price`); return false; }
 
-    const mult     = isReversal ? REVERSAL_SIZE_MULT : sizeMultiplier(score);
-    const qty      = calcQty(bal, price, mult);
-    const notional = qty * price;
+    const scoreMult  = isReversal ? REVERSAL_SIZE_MULT : sizeMultiplier(score);
+    const finalMult  = Math.max(0.10, scoreMult * regimeAdj);   // floor at 10%
+    const qty        = calcQty(bal, price, finalMult);
+    const notional   = qty * price;
     if (qty <= 0 || notional < MIN_NOTIONAL) {
       log(`SKIP ${symbol} qty=${qty} notional=${notional.toFixed(2)} < min`);
       return false;
@@ -490,7 +590,7 @@ async function placeEntry(symbol, signal, score, bal, isReversal = false) {
     const side         = signal === "LONG" ? "BUY" : "SELL";
     const positionSide = signal;
     const modeTag      = isReversal ? " ⚡REV" : "";
-    const stopStr      = isReversal ? `-${REVERSAL_STOP_PCT*100}%` : `-${STOP_LOSS_PCT*100}%`;
+    const regimeTag    = regimeAdj < 1.0 ? ` [regime:${(regimeAdj*100).toFixed(0)}%]` : "";
 
     try { await POST("/openApi/swap/v2/trade/leverage", { symbol, side: signal, leverage: LEVERAGE }); } catch {}
 
@@ -502,7 +602,7 @@ async function placeEntry(symbol, signal, score, bal, isReversal = false) {
       stats.trades++;
       tradeToday++;
       if (isReversal) reversalPositions.add(`${symbol}-${signal}`);
-      log(`✅ SWING${modeTag} ${signal.padEnd(5)} ${symbol.padEnd(18)} qty=${qty} @~${price} ${LEVERAGE}x | score=${score}/10(${(mult*100).toFixed(0)}%) stop=${stopStr} tp=+${TAKE_PROFIT_PCT*100}% | today=${tradeToday}`);
+      log(`✅ SWING${modeTag} ${signal.padEnd(5)} ${symbol.padEnd(18)} qty=${qty} @~${price} ${LEVERAGE}x | score=${score}/10(${(finalMult*100).toFixed(0)}%)${regimeTag} tp=+${TAKE_PROFIT_PCT*100}% stop=-${STOP_LOSS_PCT*100}% | today=${tradeToday}`);
       return true;
     } else {
       log(`❌ ENTRY FAIL  ${symbol} code=${r?.code} msg=${r?.msg}`);
@@ -563,9 +663,6 @@ async function placeExit(symbol, positionSide, qty, entryPrice, reason, knownPri
 }
 
 // ── Slot-fill scan ─────────────────────────────────────────────────────────────
-// After any exit closes a position, trigger a fresh entry scan ~1.5s later.
-// 1.5s gives BingX time to process the close before getOpenPositions() runs.
-// clearTimeout de-dupes — rapid multi-exit polls queue exactly ONE fill scan.
 function scheduleFillScan() {
   if (fillScanTimer) clearTimeout(fillScanTimer);
   fillScanTimer = setTimeout(() => {
@@ -575,12 +672,8 @@ function scheduleFillScan() {
 }
 
 // ── Entry scan ─────────────────────────────────────────────────────────────────
-// Stage 1 : fetch ALL 1m + 5m candles in parallel
-// Stage 2 : evaluate signals, apply cooldown guard, place entries
-//
-// reason = "interval"  → 5s setInterval cadence
-//        = "slot-fill" → triggered after an exit frees a slot
-//        = "boot"      → initial scan on startup
+// Stage 1 : parallel fetch — 1m (10 workers) + 5m (5 workers) simultaneously
+// Stage 2 : evaluate signals with regime, correlation, cooldown checks
 let scanning = false;
 async function scanEntry(reason = "interval") {
   if (scanning) return;
@@ -606,16 +699,32 @@ async function scanEntry(reason = "interval") {
     const toCheck = WATCHLIST.filter(s => !busy.has(s));
     if (!toCheck.length) return;
 
-    let openCount  = positions.length;
-    const slots    = MAX_OPEN - openCount;
-    let signals    = 0;
-    let blocked    = 0;
-    const total    = perf.wins + perf.losses;
-    const wr       = total ? `${((perf.wins / total) * 100).toFixed(1)}%` : "n/a";
-    const scanTag  = reason === "slot-fill" ? "🔄 SLOT-FILL" : (reason === "boot" ? "🚀 BOOT-SCAN" : "═ SCAN");
-    log(`${scanTag} [${slots} slot${slots !== 1 ? "s" : ""} free] | bal=$${bal.toFixed(2)} | open=${openCount}/${MAX_OPEN} | checking=${toCheck.length} | today=${tradeToday} | PnL:$${perf.dailyPnl.toFixed(2)}/$${DAILY_TARGET} | WR:${wr}`);
+    // HF: portfolio heat
+    const portfolioMargin = positions.reduce((sum, p) => {
+      const qty   = Math.abs(parseFloat(p.positionAmt  || 0));
+      const price = parseFloat(p.avgPrice || p.entryPrice || 0);
+      return sum + (qty * price > 0 ? qty * price / LEVERAGE : 0);
+    }, 0);
+    const heatPct = (bal + portfolioMargin) > 0
+      ? (portfolioMargin / (bal + portfolioMargin) * 100).toFixed(1)
+      : "0.0";
 
-    // ── Stage 1: fetch 1m AND 5m candles in parallel ───────────────────────
+    // HF: correlation — count current major coin positions
+    let majorCount = positions.filter(p => MAJOR_COINS.has(p.symbol)).length;
+
+    const openCount0 = positions.length;
+    const slots      = MAX_OPEN - openCount0;
+    let   openCount  = openCount0;
+    let   signals    = 0;
+    let   blocked    = 0;
+    const total      = perf.wins + perf.losses;
+    const wr         = total ? `${((perf.wins / total) * 100).toFixed(1)}%` : "n/a";
+    const scanTag    = reason === "slot-fill" ? "🔄 SLOT-FILL" : (reason === "boot" ? "🚀 BOOT-SCAN" : "═ SCAN");
+    const regimeAge  = regimeUpdatedAt > 0 ? `${Math.round((Date.now() - regimeUpdatedAt) / 60000)}m ago` : "pending";
+
+    log(`${scanTag} [${slots} slot${slots !== 1 ? "s" : ""} free] | regime=${marketRegime}(${regimeAge}) | heat=${heatPct}% | bal=$${bal.toFixed(2)} | open=${openCount}/${MAX_OPEN} | checking=${toCheck.length} | today=${tradeToday} | PnL:$${perf.dailyPnl.toFixed(2)}/$${DAILY_TARGET} | WR:${wr}`);
+
+    // Stage 1: fetch 1m + 5m in parallel
     const scanStart = Date.now();
     const [candleMap1m, candleMap5m] = await Promise.all([
       fetchCandlesBatch(toCheck, TIMEFRAME,     SMA_PERIOD + 4),
@@ -623,7 +732,7 @@ async function scanEntry(reason = "interval") {
     ]);
     const fetchMs = Date.now() - scanStart;
 
-    // ── Stage 2: evaluate signals and place entries ────────────────────────
+    // Stage 2: evaluate and place
     for (const sym of toCheck) {
       if (tradeToday >= MAX_DAILY) break;
       if (openCount  >= MAX_OPEN)  break;
@@ -636,38 +745,52 @@ async function scanEntry(reason = "interval") {
       if (!result) continue;
 
       signals++;
+      const { signal, score, distPct, bodyPct, rsi: rsiVal, isReversal, volRatio, mtfTag } = result;
 
-      // ── AI: Cooldown guard — skip symbol for 5 min after stop-loss ──────
+      // HF: cooldown check (after signal detection — only log when a real signal is blocked)
       if (stopCooldowns.has(sym)) {
-        const cooldownEnd = stopCooldowns.get(sym);
-        if (Date.now() < cooldownEnd) {
-          const remaining = Math.ceil((cooldownEnd - Date.now()) / 1000);
+        const cdEnd = stopCooldowns.get(sym);
+        if (Date.now() < cdEnd) {
           blocked++;
-          log(`⏸  COOLDOWN   ${sym.padEnd(18)} signal=${result.signal} blocked — ${remaining}s remaining (post-stop cooldown)`);
+          const remaining = Math.ceil((cdEnd - Date.now()) / 1000);
+          log(`⏸  COOLDOWN   ${sym.padEnd(18)} signal=${signal} blocked — ${remaining}s remaining`);
           continue;
         }
         stopCooldowns.delete(sym);
       }
 
-      const { signal, score, distPct, bodyPct, rsi: rsiVal, isReversal, volRatio, mtfTag } = result;
-      const lastBar = cv1m[cv1m.length - 2];
-      const age     = Math.round((bingxNow() - (lastBar.time + CANDLE_MS)) / 1000);
-      const rsiStr  = rsiVal  ? rsiVal.toFixed(1)    : "n/a";
-      const volStr  = volRatio ? `${volRatio.toFixed(1)}x` : "n/a";
-      const modeTag = isReversal ? " ⚡REVERSAL" : "";
+      // HF: correlation cap — skip if too many major coins already open
+      if (MAJOR_COINS.has(sym) && majorCount >= MAX_MAJOR_POSITIONS) {
+        blocked++;
+        log(`🔗 CORR-CAP   ${sym.padEnd(18)} signal=${signal} blocked — ${majorCount}/${MAX_MAJOR_POSITIONS} major positions open`);
+        continue;
+      }
 
-      log(`📊 SIGNAL${modeTag} ${signal.padEnd(5)} ${sym.padEnd(18)} score:${score}/10 | dist:${(distPct*100).toFixed(3)}% | body:${(bodyPct*100).toFixed(3)}% | RSI:${rsiStr} | vol:${volStr} | MTF:${mtfTag} | age:${age}s`);
+      // HF: regime-based size adjustment
+      const regimeAdj = regimeSizeMultiplier(signal);
 
-      const placed = await placeEntry(sym, signal, score, bal, isReversal);
+      const lastBar  = cv1m[cv1m.length - 2];
+      const age      = Math.round((bingxNow() - (lastBar.time + CANDLE_MS)) / 1000);
+      const rsiStr   = rsiVal  ? rsiVal.toFixed(1)    : "n/a";
+      const volStr   = volRatio ? `${volRatio.toFixed(1)}x` : "n/a";
+      const revLabel = isReversal ? " ⚡REVERSAL" : "";
+      const regLabel = regimeAdj < 1.0 ? ` regime:${(regimeAdj*100).toFixed(0)}%` : "";
+
+      log(`📊 SIGNAL${revLabel} ${signal.padEnd(5)} ${sym.padEnd(18)} score:${score}/10 | dist:${(distPct*100).toFixed(3)}% | body:${(bodyPct*100).toFixed(3)}% | RSI:${rsiStr} | vol:${volStr} | MTF:${mtfTag}${regLabel} | age:${age}s`);
+
+      const placed = await placeEntry(sym, signal, score, bal, isReversal, regimeAdj);
       if (placed) {
         openCount++;
         busy.add(sym);
+        if (MAJOR_COINS.has(sym)) majorCount++;
         bal = await getBalance();
         await new Promise(r => setTimeout(r, ORDER_DELAY_MS));
       }
     }
 
-    if (signals > 0) log(`═ SCAN DONE | fetch:${fetchMs}ms(1m+5m) | signals=${signals} blocked=${blocked} | trades_today=${tradeToday} | PnL:$${perf.dailyPnl.toFixed(2)}`);
+    if (signals > 0 || reason !== "interval") {
+      log(`═ SCAN DONE | fetch:${fetchMs}ms(1m+5m‖) | signals=${signals} blocked=${blocked} | trades_today=${tradeToday} | PnL:$${perf.dailyPnl.toFixed(2)}`);
+    }
   } catch (e) {
     stats.errors++;
     log(`SCAN CRASH: ${e.message}`);
@@ -676,19 +799,7 @@ async function scanEntry(reason = "interval") {
   }
 }
 
-// ── Exit monitor — 2-pass design ───────────────────────────────────────────────
-//
-//  PASS 1 (fast — uses position data, no extra API calls):
-//    Stop-loss, take-profit, trailing-stop — all from BingX position fields.
-//    livePrice fetched only when exit condition is actually met.
-//    Stop-loss fires → set 5-min cooldown on that symbol.
-//
-//  PASS 2 (parallel candle fetch):
-//    MA20 crossover check for remaining positions.
-//    Parallel 1m candle fetch for all pending symbols.
-//
-//  After all passes: if any exit fired → scheduleFillScan() for slot-fill.
-//
+// ── Exit monitor — 2-pass ─────────────────────────────────────────────────────
 let polling = false;
 async function pollExits() {
   if (polling) return;
@@ -702,7 +813,7 @@ async function pollExits() {
 
     const needsMACheck = [];
 
-    // ── PASS 1: Stop / Take-profit / Trailing-stop ─────────────────────────
+    // ── PASS 1: Stop / Take-profit / Trailing-stop (no extra API) ─────────
     for (const pos of positions) {
       const sym   = pos.symbol;
       const side  = pos.positionSide;
@@ -743,9 +854,8 @@ async function pollExits() {
         const ok = await placeExit(sym, side, qty, entry, `stop-loss${isRev?"-rev":""}`, lp);
         if (ok) {
           exitsFired++;
-          // AI: set 5-min cooldown so bot doesn't immediately re-enter after a loss
           stopCooldowns.set(sym, Date.now() + COOLDOWN_MS);
-          log(`⏸  COOLDOWN SET ${sym} — ${COOLDOWN_MS/60000}min re-entry block after stop-loss`);
+          log(`⏸  COOLDOWN SET ${sym} — ${COOLDOWN_MS/60000}min block after stop-loss`);
         }
         await new Promise(r => setTimeout(r, ORDER_DELAY_MS));
         fired = true;
@@ -787,7 +897,7 @@ async function pollExits() {
 
       const cv = candleMap.get(sym) || [];
 
-      // Method B fallback: when BingX PnL fields unavailable, compute from live price
+      // Method B fallback for missing BingX PnL fields
       if (pnlPct === null && cv.length) {
         const lp = await getLivePrice(sym);
         if (lp > 0) {
@@ -803,11 +913,7 @@ async function pollExits() {
             log(`🛑 STOP-LOSS${revTag}  ${side.padEnd(5)} ${sym.padEnd(18)} PnL:${(pnlPctB*100).toFixed(2)}% [live]`);
             closingPositions.add(posKey);
             const ok = await placeExit(sym, side, qty, entry, `stop-loss${isRev?"-rev":""}`, lp);
-            if (ok) {
-              exitsFired++;
-              stopCooldowns.set(sym, Date.now() + COOLDOWN_MS);
-              log(`⏸  COOLDOWN SET ${sym} — ${COOLDOWN_MS/60000}min re-entry block after stop-loss`);
-            }
+            if (ok) { exitsFired++; stopCooldowns.set(sym, Date.now() + COOLDOWN_MS); }
             await new Promise(r => setTimeout(r, ORDER_DELAY_MS));
             continue;
           }
@@ -830,7 +936,6 @@ async function pollExits() {
         }
       }
 
-      // MA20 crossover check
       if (!cv.length || !checkExit(cv, side)) continue;
 
       const lastBar = cv[cv.length - 2];
@@ -862,19 +967,19 @@ http.createServer((req, res) => {
     return;
   }
 
-  const total      = perf.wins + perf.losses;
-  const winRatio   = total ? `${((perf.wins / total) * 100).toFixed(1)}%` : "0%";
-  const paused     = winRatePauseUntil > Date.now()
+  const total     = perf.wins + perf.losses;
+  const winRatio  = total ? `${((perf.wins / total) * 100).toFixed(1)}%` : "0%";
+  const paused    = winRatePauseUntil > Date.now()
     ? `circuit breaker — resumes in ${Math.ceil((winRatePauseUntil - Date.now()) / 60000)}min`
     : null;
-  const cooldowns  = [...stopCooldowns.entries()]
+  const cooldowns = [...stopCooldowns.entries()]
     .filter(([, end]) => Date.now() < end)
     .map(([sym, end]) => `${sym}:${Math.ceil((end - Date.now()) / 1000)}s`);
 
   res.writeHead(200, { "Content-Type": "application/json" });
   res.end(JSON.stringify({
     status:    paused ? `⚠️ ${paused}` : "🟢 running 24/7",
-    strategy:  `${RULES.strategy_name} v${RULES.version} | MA${MA_PERIOD}/SMA${SMA_PERIOD}/RSI${RSI_PERIOD} | ${TIMEFRAME} entries | ${TIMEFRAME_HTF} MTF bias`,
+    strategy:  `${RULES.strategy_name} v${RULES.version} | MA${MA_PERIOD}/SMA${SMA_PERIOD}/RSI${RSI_PERIOD} | ${TIMEFRAME}+${TIMEFRAME_HTF}MTF`,
     uptime:    Math.round(process.uptime()) + "s",
     trades:    stats.trades,
     today:     `${tradeToday}/${MAX_DAILY}`,
@@ -882,69 +987,74 @@ http.createServer((req, res) => {
     lastScan:  stats.lastScan,
     lastExit:  stats.lastExit,
     perf: {
-      wins:          perf.wins,
-      losses:        perf.losses,
+      wins:     perf.wins,
+      losses:   perf.losses,
       winRatio,
-      dailyPnl:      `$${perf.dailyPnl.toFixed(2)} / $${DAILY_TARGET}`,
-      progress:      `${((perf.dailyPnl / DAILY_TARGET) * 100).toFixed(1)}%`
+      dailyPnl: `$${perf.dailyPnl.toFixed(2)} / $${DAILY_TARGET}`,
+      progress: `${((perf.dailyPnl / DAILY_TARGET) * 100).toFixed(1)}%`
     },
-    aiAgent: {
-      mtf_bias:         `5m MA${HTF_MA_PERIOD} confirms 1m trend direction before entry`,
-      confluence_score: "max 10pts: distance(1-3) + body(1-3) + trend-gap(1-2) + MTF(+1) + RSI-zone(+1)",
-      size_tiers:       "≥8=100% | ≥6=75% | <6=50%",
-      cooldowns_active: cooldowns.length > 0 ? cooldowns : "none",
-      smart_reentry:    `5-min stop-loss cooldown per symbol (${COOLDOWN_MS/60000} min)`
+    hedgeFundAI: {
+      market_regime:       `${marketRegime} (updated ${regimeUpdatedAt > 0 ? Math.round((Date.now()-regimeUpdatedAt)/60000)+"m ago" : "pending"})`,
+      regime_sizing:       "VOLATILE=50% · RANGING=75% · with-trend=100% · against-trend=75%",
+      correlation_cap:     `max ${MAX_MAJOR_POSITIONS} major-coin positions open simultaneously`,
+      cooldowns_active:    cooldowns.length > 0 ? cooldowns : "none",
+      watchlist_size:      WATCHLIST.length,
+      scoring:             "max 10pts: distance(1-3)+body(1-3)+trend-gap(1-2)+MTF(+1)+RSI-zone(+1)"
     },
     entryModes: {
-      trend_following:  `LONG if 1m-MA20>SMA200 + 5m-close≥5m-MA20 | SHORT if 1m-MA20<SMA200 + 5m-close≤5m-MA20`,
-      counter_reversal: `LONG/SHORT counter-trend if vol≥${REVERSAL_VOL_MULT}x prior avg (MTF skipped for reversals)`,
-      reversal_size:    `${REVERSAL_SIZE_MULT * 100}% (fixed)`,
-      reversal_stop:    `-${REVERSAL_STOP_PCT * 100}% vs trend -${STOP_LOSS_PCT * 100}%`
+      trend:    `LONG: 1m-MA>SMA200 + 5m-close≥5m-MA20 | SHORT: 1m-MA<SMA200 + 5m-close≤5m-MA20`,
+      reversal: `counter-trend vol≥${REVERSAL_VOL_MULT}× avg | 50%×regime size | stop -${REVERSAL_STOP_PCT*100}%`
     },
     riskManagement: {
-      stopLoss_trend:    `-${STOP_LOSS_PCT * 100}%`,
-      stopLoss_reversal: `-${REVERSAL_STOP_PCT * 100}%`,
-      takeProfit:        `+${TAKE_PROFIT_PCT * 100}% (swing target)`,
-      trailActivate:     `+${TRAIL_ON_PCT * 100}%`,
-      trailDistance:     `${TRAIL_DIST_PCT * 100}% from peak`,
-      circuitBreaker:    paused || "inactive"
+      stopLoss:       `-${STOP_LOSS_PCT * 100}% (all positions)`,
+      takeProfit:     `+${TAKE_PROFIT_PCT * 100}%`,
+      trailActivate:  `+${TRAIL_ON_PCT * 100}%`,
+      trailDistance:  `${TRAIL_DIST_PCT * 100}% from peak`,
+      smartCooldown:  `${COOLDOWN_MS/60000}min per symbol after stop-loss`,
+      circuitBreaker: paused || "inactive"
     },
     performance: {
-      scanConcurrency:   `${CANDLE_CONCURRENCY} workers (1m) + ${CANDLE_CONCURRENCY_HTF} workers (5m MTF) — parallel`,
-      entryLatency:      `~4-5s fetch (1m+5m parallel) + signal check`,
-      exitLatency:       "pass1: instant (position data) | pass2: parallel MA20 fetch",
-      slotFill:          "immediate — 1.5s after any exit"
+      workers:     `${CANDLE_CONCURRENCY} (1m) + ${CANDLE_CONCURRENCY_HTF} (5m) — parallel`,
+      scanTime:    "~8s for 100 symbols",
+      slotFill:    "1.5s after any exit"
     },
     config: {
-      timeframe:    `${TIMEFRAME} (entries) + ${TIMEFRAME_HTF} (MTF bias)`,
-      leverage:     `${LEVERAGE}x`,
-      riskPct:      `${RISK_PCT*100}%`,
-      maxMargin:    `$${MAX_MARGIN}`,
-      maxMaDist:    `${MAX_MA_DIST_PCT*100}%`,
-      watchlist:    WATCHLIST.length,
-      blacklist:    BLACKLIST.size,
-      scan:         `${SCAN_MS/1000}s`,
-      exit:         `${EXIT_POLL_MS/1000}s`,
-      cooldown:     `${COOLDOWN_MS/60000}min after stop-loss`
+      timeframe:  `${TIMEFRAME}+${TIMEFRAME_HTF}`,
+      leverage:   `${LEVERAGE}x`,
+      riskPct:    `${RISK_PCT*100}%`,
+      maxMargin:  `$${MAX_MARGIN}`,
+      watchlist:  WATCHLIST.length,
+      blacklist:  BLACKLIST.size,
+      scan:       `${SCAN_MS/1000}s`,
+      exit:       `${EXIT_POLL_MS/1000}s`
     }
   }, null, 2));
 }).listen(PORT, () => log(`🌐 Dashboard → http://localhost:${PORT}`));
 
 // ── Boot ───────────────────────────────────────────────────────────────────────
 await syncClock();
-log(`🏦 ${RULES.strategy_name} v${RULES.version} — HEDGE FUND EDITION`);
+log(`🏦 ${RULES.strategy_name} v${RULES.version} — HEDGE FUND AI EDITION`);
 log(`   Target       : $${DAILY_TARGET}/day | $${RULES.targets?.yearly_profit_usdt?.toLocaleString()}/year`);
 log(`   Timeframe    : ${TIMEFRAME} entries | ${TIMEFRAME_HTF} MTF bias | MA${MA_PERIOD} | SMA${SMA_PERIOD} | RSI${RSI_PERIOD}`);
-log(`   ── TREND ENTRY    within ${MAX_MA_DIST_PCT*100}% MA20 | 2-candle window | 5m MTF confirm | scored size`);
-log(`   ── REVERSAL ENTRY vol ≥ ${REVERSAL_VOL_MULT}× prior avg | 50% size | stop -${REVERSAL_STOP_PCT*100}% | no MTF needed`);
-log(`   Stop-loss    : -${STOP_LOSS_PCT*100}% trend / -${REVERSAL_STOP_PCT*100}% reversal`);
+
+// HF: load watchlist and regime before first scan
+await refreshWatchlist();
+await updateMarketRegime();
+
+log(`   Watchlist    : ${WATCHLIST.length} symbols (auto-fetched, top ${MAX_WATCHLIST} by 24h vol)`);
+log(`   Regime       : ${marketRegime}`);
+log(`   ── TREND ENTRY    within ${MAX_MA_DIST_PCT*100}% MA20 | 2-bar window | 5m MTF | scored 50/75/100%`);
+log(`   ── REVERSAL ENTRY vol ≥ ${REVERSAL_VOL_MULT}× avg | 50%×regime | stop -${REVERSAL_STOP_PCT*100}% | no MTF`);
+log(`   Stop-loss    : -${STOP_LOSS_PCT*100}% all positions`);
 log(`   Take-profit  : +${TAKE_PROFIT_PCT*100}%  |  Trail: +${TRAIL_ON_PCT*100}% activates, -${TRAIL_DIST_PCT*100}% below peak`);
-log(`   AI: Cooldown : ${COOLDOWN_MS/60000}-min re-entry block per symbol after stop-loss`);
-log(`   AI: Scoring  : dist+body+trend+MTF+RSI-zone = max 10pts → 50/75/100% size`);
-log(`   Circuit brk  : WR < ${WR_MIN*100}% (min ${WR_MIN_TRADES} trades) → pause ${WR_PAUSE_MS/60000}min`);
-log(`   Watchlist    : ${WATCHLIST.length} symbols | ${BLACKLIST.size} blacklisted`);
-log(`   Scan speed   : ${CANDLE_CONCURRENCY} workers(1m) + ${CANDLE_CONCURRENCY_HTF} workers(5m) in parallel | ~5s total`);
-log(`   Exit speed   : pass1 instant | pass2 parallel MA20 | slot-fill 1.5s post-exit`);
+log(`   HF: Regime   : VOLATILE=50% · RANGING=75% · with-trend=100% · against-trend=75%`);
+log(`   HF: Corr cap : max ${MAX_MAJOR_POSITIONS} major coins simultaneously`);
+log(`   HF: Cooldown : ${COOLDOWN_MS/60000}-min block per symbol after stop-loss`);
+log(`   Scan workers : ${CANDLE_CONCURRENCY}(1m) + ${CANDLE_CONCURRENCY_HTF}(5m) parallel → ~8s per scan`);
+log(`   Slot fill    : 1.5s post-exit | circuit breaker: WR<${WR_MIN*100}% → pause ${WR_PAUSE_MS/60000}min`);
+
+// Regime refresh every 5 minutes
+setInterval(updateMarketRegime, 5 * 60 * 1000);
 
 await scanEntry("boot");
 setInterval(scanEntry, SCAN_MS);

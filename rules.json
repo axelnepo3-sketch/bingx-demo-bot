@@ -1,126 +1,139 @@
 {
   "strategy_name":            "MA SWING TRADER",
-  "version":                  "3.5",
+  "version":                  "3.7",
   "timeframe":                "1m",
   "timeframe_htf":            "5m",
+
   "watchlist": [
-    "BTC-USDT",  "ETH-USDT",  "SOL-USDT",  "BSB-USDT",   "HYPE-USDT",
-    "ZEC-USDT",  "NEAR-USDT", "XRP-USDT",  "BILL-USDT",  "DOGE-USDT",
-    "BNB-USDT",  "UB-USDT",   "NIL-USDT",  "INJ-USDT",   "ESPORTS-USDT",
-    "BEAT-USDT", "HANTA-USDT","XAN-USDT",  "FIDA-USDT",  "AVAX-USDT",
-    "ONDO-USDT", "PLAYSOUT-USDT","AAVE-USDT","CHIP-USDT", "ADA-USDT",
-    "DEXE-USDT", "GITLAWB-USDT","GENIUS-USDT","TRX-USDT","10000NAT-USDT",
-    "BCH-USDT",  "LAB-USDT",  "LTC-USDT",  "GRASS-USDT", "SUI-USDT",
-    "WLD-USDT"
+    "BTC-USDT",  "ETH-USDT",  "SOL-USDT",  "HYPE-USDT",  "XRP-USDT",
+    "DOGE-USDT", "BNB-USDT",  "ADA-USDT",  "AVAX-USDT",  "TRX-USDT",
+    "NEAR-USDT", "LTC-USDT",  "BCH-USDT",  "INJ-USDT",   "AAVE-USDT",
+    "ONDO-USDT", "AVAX-USDT", "SUI-USDT",  "ZEC-USDT",   "GRASS-USDT",
+    "DEXE-USDT", "GENIUS-USDT","NIL-USDT", "FIDA-USDT",  "CHIP-USDT",
+    "XAN-USDT",  "BEAT-USDT", "HANTA-USDT","PLAYSOUT-USDT","ESPORTS-USDT",
+    "UB-USDT",   "BILL-USDT", "GITLAWB-USDT"
   ],
-  "watchlist_source":         "top_50_bingx_volume_daily",
-  "watchlist_last_updated":   "2026-05-26T01:33:00Z",
-  "watchlist_refresh":        "daily_midnight_utc",
-  "blacklist":                ["ETHFI-USDT", "DYM-USDT", "SUI-USDT", "WLD-USDT", "10000NAT-USDT", "LAB-USDT", "BSB-USDT"],
+  "_watchlist_note":          "Fallback only — at runtime the bot auto-fetches top 100 BingX USDT-perp by 24h volume",
+  "watchlist_source":         "AUTO: BingX /openApi/swap/v2/quote/ticker top-100 by quoteVolume, min $1M/day",
+  "watchlist_max":            100,
+  "watchlist_min_volume_usd": 1000000,
+  "watchlist_last_updated":   "auto — refreshed on boot and every midnight UTC",
+  "watchlist_refresh":        "on_boot + daily_midnight_utc",
+
+  "blacklist": ["ETHFI-USDT", "DYM-USDT", "SUI-USDT", "WLD-USDT", "10000NAT-USDT", "LAB-USDT", "BSB-USDT"],
 
   "indicators": {
     "MA20":    { "type": "SMA", "length": 20,  "source": "close", "timeframe": "1m" },
     "SMA200":  { "type": "SMA", "length": 200, "source": "close", "timeframe": "1m" },
     "MA20_5m": { "type": "SMA", "length": 20,  "source": "close", "timeframe": "5m",
-                 "purpose": "MTF bias filter — 5m trend direction must confirm 1m entry direction (trend-following only)" }
+                 "purpose": "MTF bias — 5m close vs 5m-MA20 must confirm 1m trend direction (trend entries only)" },
+    "ATR14_5m":{ "type": "ATR", "length": 14,  "timeframe": "5m",
+                 "purpose": "BTC volatility proxy for market regime detection" }
   },
 
-  "strategy_type": "CONSOLIDATED (single process handles 100% of trading)",
+  "strategy_type": "CONSOLIDATED HEDGE FUND AI SWING TRADER (single process)",
 
   "candle_rules": {
-    "sort_order":       "ascending by time (oldest first, newest last) — enforced in getCandles()",
-    "forming_bar":      "candles[-1] is the FORMING (incomplete) bar — NEVER used for any signal",
-    "last_closed":      "candles[-2] is the last CLOSED bar — used as curr in entry/exit checks",
-    "prev_closed":      "candles[-3] is the bar before last closed — used as prev in entry checks",
-    "ma_input":         "MA20 and SMA200 computed over CLOSED bars only (forming bar excluded)",
-    "htf_bars":         "5m candles: 25 bars fetched, [-1] forming excluded, [-2] is last closed 5m bar"
+    "sort_order":   "ascending by time (oldest first, newest last)",
+    "forming_bar":  "candles[-1] = FORMING bar — never used for signals",
+    "last_closed":  "candles[-2] = last CLOSED bar (curr)",
+    "prev_closed":  "candles[-3] = bar before last closed (prev)",
+    "ma_input":     "MA20/SMA200 computed over closed bars only",
+    "htf_bars":     "5m: 25 bars fetched, [-1] excluded as forming, [-2] is last closed 5m bar",
+    "high_low":     "high and low parsed from klines for ATR calculation"
   },
 
   "bias_filter": {
-    "primary":    "1m MA20 vs 1m SMA200 (trend direction on 1m)",
-    "secondary":  "5m close vs 5m MA20 (MTF confirmation — trend entries only)",
-    "long_bias":  "1m MA20 > SMA200 AND 5m close ≥ 5m-MA20 → LONG entries only",
-    "short_bias": "1m MA20 < SMA200 AND 5m close ≤ 5m-MA20 → SHORT entries only",
-    "neutral":    "1m MA20 == SMA200 OR 5m disagrees with 1m → skip trend entry",
-    "reversal":   "MTF check skipped for reversal entries — counter-trend by design",
-    "purpose":    "Two-layer trend confirmation: 1m for signal, 5m for bias alignment"
+    "primary":   "1m MA20 vs 1m SMA200",
+    "secondary": "5m close vs 5m MA20 (MTF — trend entries only)",
+    "long":      "1m MA20 > SMA200 AND 5m close ≥ 5m-MA20 → LONG",
+    "short":     "1m MA20 < SMA200 AND 5m close ≤ 5m-MA20 → SHORT",
+    "neutral":   "MA20 == SMA200 OR 5m disagrees → skip trend entry",
+    "reversal":  "MTF skipped — counter-trend by design"
   },
 
   "entry": {
-    "long":  "SWING LONG: GREEN candle + prev RED + close ABOVE MA20 + within 0.5% + 1m MA20>SMA200 + 5m close≥5m-MA20 (MTF) + RSI<70 + signal fresh within 1.5 bars",
-    "short": "SWING SHORT: RED candle + prev GREEN + close BELOW MA20 + within 0.5% + 1m MA20<SMA200 + 5m close≤5m-MA20 (MTF) + RSI>30 + signal fresh within 1.5 bars",
-    "order_type":          "MARKET — fills immediately at best available price",
+    "long":  "SWING LONG: GREEN + prev RED + close≥MA20 + within 0.5% + 1m-MA>SMA200 + 5m-close≥5m-MA20 + RSI<70",
+    "short": "SWING SHORT: RED + prev GREEN + close≤MA20 + within 0.5% + 1m-MA<SMA200 + 5m-close≤5m-MA20 + RSI>30",
+    "order_type":          "MARKET",
     "max_ma_distance_pct": 0.005,
-    "freshness_candles":   2,
-    "logic": {
-      "step1_freshness": "Max 2 candle closes after signal — entry valid on 1st or 2nd close only. 3rd close onwards = INVALID",
-      "step2_bias_1m":   "1m MA20 > SMA200 → LONG only | 1m MA20 < SMA200 → SHORT only | equal → skip",
-      "step3_bias_5m":   "5m close ≥ 5m-MA20 → bullish 5m (required for LONG) | 5m close ≤ 5m-MA20 → bearish 5m (required for SHORT)",
-      "step4_body":      "|close - open| / open >= 0.0002 (0.02% min body)",
-      "step5_reversal":  "curr GREEN + prev RED for LONG | curr RED + prev GREEN for SHORT",
-      "step6_ma20":      "curr.close >= MA20 for LONG | curr.close <= MA20 for SHORT",
-      "step7_proximity": "|close - MA20| / MA20 <= 0.005 — must be within 0.5% of MA20, no chasing",
-      "purpose":         "Tight MA20 bounce entries — fresh, close to MA20, dual-timeframe trend-aligned"
-    }
+    "freshness_candles":   2
   },
 
   "exit": {
     "priority_order": "1=stop_loss | 2=take_profit | 3=trailing_stop | 4=MA20_crossover",
-    "stop_loss":      "-3% unrealized PnL on margin — hard stop, checked every 5s, MARKET order",
-    "take_profit":    "+8% unrealized PnL on margin — swing target (2.67:1 R:R vs -3% stop), MARKET order",
-    "trailing_stop":  "activates at +4% PnL, trails 2% below peak — locks in swing gains, MARKET order",
+    "stop_loss":      "-3% unrealized PnL — all positions (trend + reversal unified)",
+    "take_profit":    "+8% swing target (2.67:1 R:R)",
+    "trailing_stop":  "activates at +4%, trails 2% below peak",
     "ma20_crossover": {
-      "long":  "Close LONG: curr.close < MA20 AND prev.close >= prevMA20 (crossed below MA20)",
-      "short": "Close SHORT: curr.close > MA20 AND prev.close <= prevMA20 (crossed above MA20)",
-      "note":  "NO freshness guard — exits always fire regardless of candle age"
+      "long":  "curr.close < MA20 AND prev.close >= prevMA20",
+      "short": "curr.close > MA20 AND prev.close <= prevMA20",
+      "note":  "No freshness guard — exits always fire"
     },
-    "order_type":    "MARKET — fills immediately at best available price",
-    "double_exit_guard": "closingPositions Set prevents re-sending close order while one is in-flight",
-    "logic": {
-      "check_interval":  "Every 5 seconds",
-      "freshness":       "NONE on exits — exits must never be blocked by age",
-      "ma_consistency":  "currMA and prevMA both computed from closed bars at their respective positions",
-      "pnl_method_A":    "BingX unrealizedProfit / initialMargin (primary — most accurate)",
-      "pnl_method_B":    "livePrice delta * leverage (fallback when BingX fields unavailable)",
-      "stop_formula":    "pnlPct = unrealizedProfit / initialMargin — compared to -0.03 / +0.08",
-      "tracking":        "Logs: price%, margin PnL%, USD PnL, daily total, W/L ratio",
-      "purpose":         "Priority exits: stop → take-profit → trail → MA20. Never block an exit."
+    "order_type":       "MARKET",
+    "double_exit_guard":"closingPositions Set prevents race condition"
+  },
+
+  "hf_agent": {
+    "description":          "Hedge Fund AI Agent — multi-layer analysis, regime-aware sizing, correlation control",
+
+    "market_regime": {
+      "enabled":      true,
+      "source":       "BTC-USDT 5m candles",
+      "update_freq":  "every 5 minutes + on boot + on daily reset",
+      "detection": {
+        "VOLATILE":   "ATR(14) / price > 0.3% per 5m bar → reduce all sizes to 50%",
+        "BULL_TREND": "MA20 slope > +0.05% over 5 bars → LONG=100%, SHORT=75%",
+        "BEAR_TREND": "MA20 slope < -0.05% over 5 bars → SHORT=100%, LONG=75%",
+        "RANGING":    "slope flat, ATR normal → all entries at 75%",
+        "UNKNOWN":    "detection failed → 100% (no penalty)"
+      }
+    },
+
+    "correlation_control": {
+      "enabled":             true,
+      "major_coins_cap":     5,
+      "major_coins":         ["BTC-USDT","ETH-USDT","SOL-USDT","BNB-USDT","AVAX-USDT","ADA-USDT","XRP-USDT","NEAR-USDT","TRX-USDT","BCH-USDT","LTC-USDT","DOGE-USDT","DOT-USDT","LINK-USDT","MATIC-USDT","INJ-USDT","APT-USDT","ARB-USDT","OP-USDT","ATOM-USDT","FIL-USDT","ICP-USDT","HBAR-USDT","SUI-USDT","WLD-USDT"],
+      "description":         "Max 5 major-coin positions open simultaneously — prevents over-exposure to BTC-correlated assets",
+      "max_major_positions": 5
+    },
+
+    "signal_scoring": {
+      "max_score":   10,
+      "breakdown":   "distance(1-3) + body(1-3) + trend-gap(1-2) + MTF-confirm(+1) + RSI-zone-40-60(+1)",
+      "size_tiers":  "≥8=100% | ≥6=75% | <6=50%",
+      "regime_mult": "score_mult × regime_mult (stacked)",
+      "reversal":    "fixed 50% × regime_mult (not score-based)"
+    },
+
+    "smart_reentry": {
+      "enabled":          true,
+      "cooldown_minutes": 5,
+      "description":      "5-min per-symbol block after stop-loss fires — prevents revenge trades on same failed setup"
+    },
+
+    "portfolio_heat": {
+      "description": "Total open margin / (available balance + open margin) × 100 — logged on every scan",
+      "purpose":     "Real-time exposure visibility to prevent over-leveraging"
     }
   },
 
-  "ai_agent": {
-    "description":           "Bot thinks and executes like an AI agent — multi-indicator confluence, adaptive sizing, smart re-entry logic",
-    "mtf_confirmation":      "5m MA20 bias must align with 1m entry direction (trend-following only)",
-    "confluence_scoring":    "max 10pts: distance(1-3) + body(1-3) + trend-gap(1-2) + MTF-confirm(+1) + RSI-zone(+1)",
-    "size_by_confluence":    "≥8pts=100% size | ≥6pts=75% | <6pts=50%",
-    "smart_reentry":         "5-min cooldown per symbol after stop-loss fires — no revenge trades",
-    "reversal_mtf_exempt":   "Counter-trend reversals skip MTF check (they ARE the counter-trend move)"
-  },
-
-  "consolidation_filter": {
-    "enabled":     false,
-    "description": "DISABLED — MA20 + SMA200 + 5m MTF bias is sufficient filter"
-  },
-
-  "volume_filter": {
-    "enabled":     false,
-    "description": "DISABLED for trend entries — volume required for reversal entries only (≥2x)"
-  },
+  "consolidation_filter": { "enabled": false },
+  "volume_filter":         { "enabled": false, "note": "Volume used for reversal detection only" },
 
   "position_sizing": {
     "risk_pct":     0.01,
     "max_margin":   500.00,
     "leverage":     5,
     "min_notional": 5.00,
-    "qty_formula":  "floor((min(balance * 0.01, 500) * sizeMultiplier * 5) / price, dynamic_decimals)",
+    "qty_formula":  "floor((min(balance×0.01, 500) × scoreMult × regimeMult × 5) / price, dynamic_decimals)",
     "qty_precision": {
-      "price_gte_10000": "4 decimal places (BTC-range: qty=0.0050)",
-      "price_gte_1000":  "3 decimal places (ETH-range: qty=0.200)",
-      "price_gte_10":    "2 decimal places (SOL-range: qty=3.33)",
-      "price_gte_1":     "1 decimal place  (NEAR-range: qty=50.0)",
-      "price_lt_1":      "0 decimal places (DOGE-range: qty=2500)"
-    },
-    "description":  "Risk 1% of balance per trade, max $500 margin, 5x leverage, size scaled by confluence score"
+      "price_gte_10000": "4 decimal places",
+      "price_gte_1000":  "3 decimal places",
+      "price_gte_10":    "2 decimal places",
+      "price_gte_1":     "1 decimal place",
+      "price_lt_1":      "0 decimal places"
+    }
   },
 
   "limits": {
@@ -132,7 +145,7 @@
     "scan_interval_ms":    5000,
     "exit_poll_ms":        5000,
     "stop_loss_pct":       0.03,
-    "description":         "Max 20 open, 500/day | fetch:200ms between symbols | order:500ms after placement | scan/exit:5s | stop:-3% TP:+8% trail:+4%→-2%"
+    "description":         "Max 20 open | 500/day | stop:-3%(all) TP:+8% trail:+4%→2% | rev-vol:1×avg | corr-cap:5 majors | cooldown:5min"
   },
 
   "targets": {
@@ -141,17 +154,16 @@
   },
 
   "reversal_entry": {
-    "enabled":           true,
-    "description":       "Counter-trend entries allowed when volume confirms a possible reversal. MTF check skipped — reversals ARE counter-trend by design.",
-    "long_in_short_bias":  "1m MA20 < SMA200 (downtrend) + GREEN candle + prev RED + close ≥ MA20 + within 0.5% + RSI<70 + vol ≥ 2x prior avg → LONG reversal",
-    "short_in_long_bias":  "1m MA20 > SMA200 (uptrend)   + RED  candle + prev GREEN + close ≤ MA20 + within 0.5% + RSI>30 + vol ≥ 2x prior avg → SHORT reversal",
-    "volume_multiplier": 2.0,
-    "volume_period":     20,
-    "volume_baseline":   "20-bar avg computed over CLOSED bars PRIOR to curr (excludes forming bar AND curr bar)",
-    "mtf_check":         "SKIPPED — counter-trend entries are exempt from 5m MTF confirmation",
-    "size_multiplier":   0.50,
-    "stop_loss_pct":     0.015,
-    "note":              "Reversal entries use 50% normal size and -1.5% stop (tighter) vs trend entries at full size and -3% stop"
+    "enabled":              true,
+    "long_in_short_bias":   "1m MA20<SMA200 + GREEN + prev RED + close≥MA20 ±0.5% + RSI<70 + vol≥1× avg → LONG reversal",
+    "short_in_long_bias":   "1m MA20>SMA200 + RED + prev GREEN + close≤MA20 ±0.5% + RSI>30 + vol≥1× avg → SHORT reversal",
+    "volume_multiplier":    1.0,
+    "volume_period":        20,
+    "volume_baseline":      "20-bar avg over prior closed bars (forming bar AND curr bar excluded)",
+    "mtf_check":            "SKIPPED",
+    "size_multiplier":      0.50,
+    "stop_loss_pct":        0.03,
+    "note":                 "50% base size × regime multiplier. Stop unified at -3%. Vol bar: any candle with vol ≥ 20-bar avg qualifies."
   },
 
   "risk_management": {
@@ -165,13 +177,13 @@
     "win_rate_min":              0.40,
     "win_rate_min_trades":       10,
     "win_rate_pause_minutes":    30,
-    "description":               "Swing R:R — Take profit +8% | Trail activates +4% trailing 2% | Stop -3% | 5-min cooldown after stop-loss | Daily target $200 (tracking only, no halt) | Bot runs 24/7 | Circuit breaker: pause 30min if WR < 40% after 10+ trades"
+    "description":               "Swing: TP+8% | Trail+4%/−2% | Stop-3% ALL | 5-min cooldown | Daily $200 target (tracking only) | 24/7 | Circuit breaker WR<40% → pause 30min"
   },
 
   "session": {
     "filter":   "none",
     "run":      "24/7",
-    "on_start": ["balance_check", "daily_reset", "boot_scan"]
+    "on_start": ["clock_sync", "watchlist_fetch", "regime_detection", "balance_check", "boot_scan"]
   },
 
   "deployment": {
@@ -179,43 +191,38 @@
     "environment":    "BingX Perpetual Futures DEMO",
     "api_endpoint":   "open-api-vst.bingx.com",
     "restart_policy": "ON_FAILURE",
-    "process":        "bot.js (CONSOLIDATED SWING TRADER BOT — single process, 100% of trading)"
-  },
-
-  "persistence": {
-    "description": "State lives in Railway environment — restarts pick up from BingX live positions"
-  },
-
-  "profitability_tracking": {
-    "daily_pnl":     "Realized P&L per trade ($) + daily running total",
-    "win_counter":   "Count of profitable closed trades",
-    "loss_counter":  "Count of losing closed trades",
-    "win_ratio":     "win_count / total_trades * 100",
-    "display_format":"icon EXIT SIDE SYMBOL price:X% margin:Y% | PnL: $Z | Daily: $D | W/L: N/M (R%)",
-    "purpose":       "Real-time profitability visibility in Railway logs"
+    "process":        "bot.js — Consolidated Hedge Fund AI Swing Trader"
   },
 
   "performance": {
-    "scan_latency":     "~4-5s per full watchlist scan (1m+5m candles fetched in parallel)",
-    "entry_latency":    "5–8s after candle close",
-    "exit_poll_passes": "2-pass: Pass1=stop/TP/trail from position data (0 extra API calls), Pass2=parallel MA20 fetch for crossover check only",
-    "livePrice_calls":  "on-demand only — fetched once when a stop/TP/trail exit condition is actually met",
-    "slot_fill":        "immediate — slot-fill scan triggered 1.5s after any successful exit"
+    "scan_workers":     "10 (1m) + 5 (5m) — fetched in parallel",
+    "scan_latency":     "~8s for 100 symbols",
+    "entry_latency":    "~8-12s after candle close",
+    "exit_poll_passes": "2-pass: Pass1=stop/TP/trail (no extra API), Pass2=parallel MA20 fetch",
+    "livePrice_calls":  "on-demand only when exit condition fires",
+    "slot_fill":        "1.5s after any successful exit",
+    "regime_refresh":   "every 5 min + boot + midnight"
+  },
+
+  "profitability_tracking": {
+    "daily_pnl":     "Realized P&L per trade + daily total",
+    "win_ratio":     "wins / total × 100",
+    "portfolio_heat":"open margin / (available + open margin) × 100",
+    "display_format":"icon EXIT SIDE SYMBOL [reason] price:X% margin:Y% | PnL:$Z | Daily:$D | W/L:N/M(R%)"
   },
 
   "debug": {
-    "log_level":  "critical events only (entries, exits, stop-losses, take-profits, trail-stops, cooldowns, scan summaries)",
-    "purpose":    "Minimize Railway log bloat while retaining all actionable info"
+    "log_level": "critical events: entries, exits, stops, TPs, trails, cooldowns, regime changes, scan summaries"
   },
 
   "changelog": {
-    "v3.5": "Scalper → Swing Trader: MTF 5m MA20 bias layer for trend entries, TP +6%→+8%, trail activates +3%→+4%, 5-min stop-loss cooldown per symbol (no revenge trades), enhanced signal scoring max 10pts (MTF+RSI-zone bonuses), all 'scalper' references renamed to 'swing trader'",
-    "v3.4": "Slot-fill scan: scheduleFillScan() fires 1.5s after any successful exit so freed slots are filled immediately (was waiting up to 5s for next interval). scanEntry tagged with reason='slot-fill' for log clarity.",
-    "v3.3": "5-bug audit: volAvg excludes curr bar (slice(0,-2)), fetchCandlesBatch 5 concurrent workers (scan 20s→4s), 2-pass pollExits, livePrice on-demand only, getCandles 1-retry with 300ms wait",
-    "v3.2": "Counter-trend reversal entries: LONG in short-bias + SHORT in long-bias, gated by ≥2x volume surge. 50% size, -1.5% stop, reversalPositions tracker",
-    "v3.1": "8-bug fix: dynamic qty precision, double-exit guard, livePrice for method A, checkDailyReset in pollExits, TDZ cleanup, removed dead DAILY_LOSS_LIM, MAX_DAILY log, closingPositions daily clear",
-    "v3.0": "Hedge fund edition: take-profit +6%, trailing stop +3%/−2%, circuit breaker, RSI filter, signal scoring, daily target tracking",
-    "v2.1": "2-candle freshness window, MA20 proximity 0.5%, SMA200 bias, blacklist additions",
-    "v2.0": "SMA200 trend bias, stop-loss on margin PnL, inverted signal fix, late entry fix"
+    "v3.7": "HF AI Edition: auto-watchlist top-100 BingX USDT-perp (boot+midnight refresh), market regime detection (BTC 5m ATR+slope → BULL/BEAR/RANGING/VOLATILE), regime-based sizing (VOLATILE=50% RANGING=75% with-trend=100%), major-coin correlation cap (max 5 simultaneous), portfolio heat logging, 10 scan workers (was 5), ATR function, high/low in candles. Bundles v3.6: reversal vol 2×→1×, reversal stop -1.5%→-3%",
+    "v3.6": "Reversal vol 2×→1× (any vol≥avg qualifies), reversal stop -1.5%→-3% (unified with trend)",
+    "v3.5": "Scalper→Swing Trader: 5m MTF, TP+8%, trail+4%, 5-min cooldown, scoring max 10pts",
+    "v3.4": "Slot-fill scan 1.5s after exit",
+    "v3.3": "volAvg fix, parallel 5-worker fetch, 2-pass pollExits, livePrice on-demand, getCandles retry",
+    "v3.2": "Counter-trend reversal entries with volume gating",
+    "v3.1": "8-bug fix: qty precision, double-exit guard, PnL methods, TDZ, daily resets",
+    "v3.0": "TP+6%, trailing stop, circuit breaker, RSI, signal scoring"
   }
 }
