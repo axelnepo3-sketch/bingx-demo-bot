@@ -1,5 +1,5 @@
 /**
- * BingX Demo Trading Bot — MA Swing Trader v4.0 (Hedge Fund AI Edition)
+ * BingX Demo Trading Bot — MA Swing Trader v4.1 (Hedge Fund AI Edition)
  * Target: $200/day | $50,000/year
  *
  * ═══════════════════════════════════════════════════════════════════════════
@@ -34,22 +34,27 @@
  *     Stop : -3% (unified with trend)
  *
  * ═══════════════════════════════════════════════════════════════════════════
- *  EXITS
+ *  EXITS (v4.1)
  * ═══════════════════════════════════════════════════════════════════════════
- *  Priority: stop-loss(-3%) → take-profit(+8%) → trail(+4%/−2%) → MA20-cross
+ *  1. Exchange STOP_MARKET order placed on BingX immediately after entry
+ *     → real-time stop, no polling delay, exact price execution
+ *  2. Trailing-stop (software): activates +2%, trails 2% below peak
+ *     → trail fires → cancel exchange stop → market close
+ *  3. Software stop fallback: -2% PnL via polling (backup if stop order fails)
+ *  Stop: -2%  |  Trail: activates +2%, distance 2%  |  No fixed take-profit
  *
  * ═══════════════════════════════════════════════════════════════════════════
  *  CHANGELOG
  * ═══════════════════════════════════════════════════════════════════════════
+ *  v4.1: Exchange-side STOP_MARKET orders at entry — eliminates polling delay
+ *        for stop-loss. cancelExchangeStop before trail exits. Stale-state
+ *        cleanup in pollExits detects externally closed positions. Poll 5s→2s.
+ *  v4.0: Fixed TP removed. Trail activates +2% (was +4%). Stop -3%→-2% all.
+ *  v3.9: MA20 crossover exit removed. pollExits 2-pass→single-pass.
+ *  v3.8: SMA200→SMA30 trend indicator. Candle fetch 204→34 bars.
  *  v3.7: HF AI Edition — auto-watchlist 100 symbols, market regime detection,
  *        regime-based sizing, major coin correlation cap, portfolio heat log,
  *        10 scan workers (was 5), ATR calculation, high/low in candles
- *  v3.6: Reversal vol 2×→1× (any vol≥avg), reversal stop -1.5%→-3% (unified)
- *  v3.5: Scalper→Swing Trader, 5m MTF, TP+8%, trail+4%, 5-min cooldown,
- *        scoring max 10pts
- *  v3.4: Slot-fill scan 1.5s after exit
- *  v3.3: volAvg fix, parallel 5-worker fetch, 2-pass pollExits, livePrice
- *        on-demand, getCandles 1-retry
  */
 
 import axios from "axios";
@@ -181,6 +186,12 @@ async function POST(path, params = {}) {
   const r  = await axios.post(`${BASE_URL}${path}?${qs}`, null, { headers: { "X-BX-APIKEY": k }, timeout: 8000 });
   return r.data;
 }
+async function DEL(path, params = {}) {
+  const { k, s } = creds();
+  const qs = buildQS({ ...params, timestamp: bingxNow() }, s);
+  const r  = await axios.delete(`${BASE_URL}${path}?${qs}`, { headers: { "X-BX-APIKEY": k }, timeout: 8000 });
+  return r.data;
+}
 
 // ── Stats & logging ────────────────────────────────────────────────────────────
 const perf  = { wins: 0, losses: 0, dailyPnl: 0 };
@@ -198,6 +209,7 @@ const peakPnl           = new Map();   // peak PnL per position
 const closingPositions  = new Set();   // in-flight closes
 const reversalPositions = new Set();   // counter-trend positions (for log tagging)
 const stopCooldowns     = new Map();   // symbol → cooldown end timestamp
+const stopOrders        = new Map();   // `${sym}-${side}` → BingX stop orderId
 let   winRatePauseUntil = 0;
 let   fillScanTimer     = null;
 
@@ -222,6 +234,7 @@ function checkDailyReset() {
     closingPositions.clear();
     reversalPositions.clear();
     stopCooldowns.clear();
+    stopOrders.clear();
     log(`📅 Daily reset — all counters cleared`);
     // Refresh watchlist and regime on new day (non-blocking)
     refreshWatchlist().catch(e => log(`WARN: midnight watchlist refresh failed: ${e.message}`));
@@ -558,6 +571,59 @@ function calcQty(bal, price, multiplier = 1.0) {
   return Math.floor(rawQty * (10 ** decimals)) / (10 ** decimals);
 }
 
+// ── Exchange-side stop order helpers ──────────────────────────────────────────
+function roundStopPrice(p) {
+  if      (p >= 10000) return Math.round(p * 1)    / 1;
+  else if (p >=  1000) return Math.round(p * 10)   / 10;
+  else if (p >=   100) return Math.round(p * 100)  / 100;
+  else if (p >=    10) return Math.round(p * 1000) / 1000;
+  else if (p >=     1) return Math.round(p * 10000)/ 10000;
+  else                 return Math.round(p * 100000)/100000;
+}
+
+async function placeExchangeStop(symbol, positionSide, qty, entryPrice) {
+  // Price move that equals STOP_LOSS_PCT PnL at current leverage
+  const isRev    = reversalPositions.has(`${symbol}-${positionSide}`);
+  const stopPct  = isRev ? REVERSAL_STOP_PCT : STOP_LOSS_PCT;
+  const priceMov = stopPct / LEVERAGE;
+  const rawStop  = positionSide === "LONG"
+    ? entryPrice * (1 - priceMov)
+    : entryPrice * (1 + priceMov);
+  const sp       = roundStopPrice(rawStop);
+  const side     = positionSide === "LONG" ? "SELL" : "BUY";
+  try {
+    const r = await POST("/openApi/swap/v2/trade/order", {
+      symbol, side, positionSide,
+      type:      "STOP_MARKET",
+      quantity:  Math.abs(qty),
+      stopPrice: sp
+    });
+    if (r?.code === 0) {
+      const orderId = r.data?.order?.orderId;
+      if (orderId) stopOrders.set(`${symbol}-${positionSide}`, orderId);
+      log(`🔒 STOP-ORDER  ${positionSide.padEnd(5)} ${symbol.padEnd(18)} @${sp} (≈-${(stopPct*100).toFixed(0)}%PnL)`);
+    } else {
+      log(`⚠️  STOP-ORDER FAIL ${symbol} ${positionSide} code=${r?.code} — software fallback active`);
+    }
+  } catch (e) {
+    log(`⚠️  STOP-ORDER ERR ${symbol}: ${e.message} — software fallback active`);
+  }
+}
+
+async function cancelExchangeStop(symbol, positionSide) {
+  const posKey  = `${symbol}-${positionSide}`;
+  const orderId = stopOrders.get(posKey);
+  if (!orderId) return;
+  stopOrders.delete(posKey);
+  try {
+    await DEL("/openApi/swap/v2/trade/order", { symbol, orderId });
+    log(`🗑  STOP-ORDER CANCELLED ${positionSide} ${symbol}`);
+  } catch (e) {
+    // May already be filled — not an error
+    log(`ℹ️  STOP-ORDER CANCEL ${symbol} ${positionSide} — ${e.message}`);
+  }
+}
+
 // ── Place entry ────────────────────────────────────────────────────────────────
 async function placeEntry(symbol, signal, score, bal, isReversal = false, regimeAdj = 1.0) {
   try {
@@ -589,6 +655,8 @@ async function placeEntry(symbol, signal, score, bal, isReversal = false, regime
       tradeToday++;
       if (isReversal) reversalPositions.add(`${symbol}-${signal}`);
       log(`✅ SWING${modeTag} ${signal.padEnd(5)} ${symbol.padEnd(18)} qty=${qty} @~${price} ${LEVERAGE}x | score=${score}/10(${(finalMult*100).toFixed(0)}%)${regimeTag} trail≥+${TRAIL_ON_PCT*100}%/−${TRAIL_DIST_PCT*100}% stop=-${STOP_LOSS_PCT*100}% | today=${tradeToday}`);
+      // Place exchange-side STOP_MARKET immediately — no polling delay
+      await placeExchangeStop(symbol, signal, qty, price);
       return true;
     } else {
       log(`❌ ENTRY FAIL  ${symbol} code=${r?.code} msg=${r?.msg}`);
@@ -604,6 +672,8 @@ async function placeEntry(symbol, signal, score, bal, isReversal = false, regime
 // ── Place exit ─────────────────────────────────────────────────────────────────
 async function placeExit(symbol, positionSide, qty, entryPrice, reason, knownPrice = 0) {
   try {
+    // Cancel exchange stop order first — prevents double-close race
+    await cancelExchangeStop(symbol, positionSide);
     const exitPrice = knownPrice || await getLivePrice(symbol);
     if (!exitPrice) { log(`SKIP EXIT ${symbol} — no live price`); return false; }
 
@@ -785,9 +855,9 @@ async function scanEntry(reason = "interval") {
   }
 }
 
-// ── Exit monitor — single-pass (stop-loss → take-profit → trailing-stop) ──────
-// MA20 crossover exit removed in v3.9 — positions ride until a PnL exit fires.
-// Priority: 1=stop-loss | 2=take-profit | 3=trailing-stop
+// ── Exit monitor ──────────────────────────────────────────────────────────────
+// Priority: 1=exchange STOP_MARKET (BingX real-time) | 2=trail (polling, 2s)
+//           3=software stop fallback (backup if stop order failed to place)
 let polling = false;
 async function pollExits() {
   if (polling) return;
@@ -797,6 +867,33 @@ async function pollExits() {
     checkDailyReset();
 
     const positions = await getOpenPositions();
+
+    // ── Stale-state cleanup: detect positions BingX closed via exchange stop ─
+    // (position no longer in active list but we still have state for it)
+    const activePosKeys = new Set(
+      positions
+        .filter(p => parseFloat(p.positionAmt || 0) !== 0)
+        .map(p => `${p.symbol}-${p.positionSide}`)
+    );
+    for (const key of [...peakPnl.keys()]) {
+      if (!activePosKeys.has(key)) {
+        const hadStopOrder = stopOrders.has(key);
+        peakPnl.delete(key);
+        closingPositions.delete(key);
+        reversalPositions.delete(key);
+        stopOrders.delete(key);
+        if (hadStopOrder) {
+          // Exchange stop order fired — counts as an exit, free the slot
+          log(`🔒→✅ EXCHANGE STOP FILLED ${key} — slot freed`);
+          exitsFired++;
+          // Set cooldown on the symbol
+          const sym = key.split("-LONG")[0].split("-SHORT")[0];
+          stopCooldowns.set(sym, Date.now() + COOLDOWN_MS);
+          log(`⏸  COOLDOWN SET ${sym} — ${COOLDOWN_MS/60000}min after exchange stop`);
+        }
+      }
+    }
+
     if (!positions.length) return;
 
     for (const pos of positions) {
@@ -837,10 +934,10 @@ async function pollExits() {
       if (pnlPct > prevPeak) peakPnl.set(posKey, pnlPct);
       const peak = peakPnl.get(posKey);
 
-      // ── 1. Stop-loss ──────────────────────────────────────────────────────
+      // ── 1. Software stop fallback (exchange stop is primary) ─────────────
       if (pnlPct <= -stopPct) {
         const lp = cachedLp || await getLivePrice(sym);
-        log(`🛑 STOP-LOSS${revTag}  ${side.padEnd(5)} ${sym.padEnd(18)} PnL:${(pnlPct*100).toFixed(2)}% $${pnlUsd.toFixed(2)} stop=${stopPct*100}%`);
+        log(`🛑 STOP-LOSS${revTag} [sw-fallback] ${side.padEnd(5)} ${sym.padEnd(18)} PnL:${(pnlPct*100).toFixed(2)}% $${pnlUsd.toFixed(2)} stop=${stopPct*100}%`);
         closingPositions.add(posKey);
         const ok = await placeExit(sym, side, qty, entry, `stop-loss${isRev?"-rev":""}`, lp);
         if (ok) {
