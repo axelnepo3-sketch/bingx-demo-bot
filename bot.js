@@ -1,5 +1,5 @@
 /**
- * BingX Demo Trading Bot — MA Swing Trader v4.3 (Hedge Fund AI Edition)
+ * BingX Demo Trading Bot — MA Swing Trader v4.4 (Hedge Fund AI Edition)
  * Target: $200/day | $50,000/year
  *
  * ═══════════════════════════════════════════════════════════════════════════
@@ -46,6 +46,11 @@
  * ═══════════════════════════════════════════════════════════════════════════
  *  CHANGELOG
  * ═══════════════════════════════════════════════════════════════════════════
+ *  v4.4: Bug fixes — (1) positionInfo Map added: stores {entry,qty} at entry,
+ *        used by exchange-stop cleanup to compute accurate PnL (was flat $2);
+ *        (2) RSI scoring bonus fixed: was rsiVal 40-60 (dead code since filter
+ *        now requires <30/>70), changed to rsiVal<25||>75 (deep extreme +1pt);
+ *        (3) positionInfo.delete in placeExit prevents accumulation.
  *  v4.3: RSI entry filter changed — LONG requires RSI<30 (oversold), SHORT
  *        requires RSI>70 (overbought). Trades only at extremes, not midrange.
  *  v4.2: Bug fixes — cleanup loop iterates peakPnl+stopOrders (was peakPnl
@@ -216,6 +221,7 @@ const closingPositions  = new Set();   // in-flight closes
 const reversalPositions = new Set();   // counter-trend positions (for log tagging)
 const stopCooldowns     = new Map();   // symbol → cooldown end timestamp
 const stopOrders        = new Map();   // `${sym}-${side}` → BingX stop orderId
+const positionInfo      = new Map();   // `${sym}-${side}` → {entry, qty} for exchange-stop PnL calc
 let   winRatePauseUntil = 0;
 let   fillScanTimer     = null;
 
@@ -241,6 +247,7 @@ function checkDailyReset() {
     reversalPositions.clear();
     stopCooldowns.clear();
     stopOrders.clear();
+    positionInfo.clear();
     log(`📅 Daily reset — all counters cleared`);
     // Refresh watchlist and regime on new day (non-blocking)
     refreshWatchlist().catch(e => log(`WARN: midnight watchlist refresh failed: ${e.message}`));
@@ -310,7 +317,7 @@ function signalScore(distPct, bodyPct, ma20, sma30, rsiVal, mtfConfirmed) {
   const trendGap = sma30 > 0 ? Math.abs(ma20 - sma30) / sma30 : 0;
   if (trendGap > 0.002) s += 2; else s += 1;  // 0.2% threshold fits MA20/SMA30 proximity
   if (mtfConfirmed) s += 1;
-  if (rsiVal && rsiVal >= 40 && rsiVal <= 60) s += 1;
+  if (rsiVal && (rsiVal < 25 || rsiVal > 75)) s += 1;  // deep extreme: <25 oversold / >75 overbought
   return s;
 }
 
@@ -660,6 +667,7 @@ async function placeEntry(symbol, signal, score, bal, isReversal = false, regime
       stats.trades++;
       tradeToday++;
       if (isReversal) reversalPositions.add(`${symbol}-${signal}`);
+      positionInfo.set(`${symbol}-${signal}`, { entry: price, qty });  // for exchange-stop PnL calc
       log(`✅ SWING${modeTag} ${signal.padEnd(5)} ${symbol.padEnd(18)} qty=${qty} @~${price} ${LEVERAGE}x | score=${score}/10(${(finalMult*100).toFixed(0)}%)${regimeTag} trail≥+${TRAIL_ON_PCT*100}%/−${TRAIL_DIST_PCT*100}% stop=-${STOP_LOSS_PCT*100}% | today=${tradeToday}`);
       // Place exchange-side STOP_MARKET immediately — no polling delay
       await placeExchangeStop(symbol, signal, qty, price);
@@ -707,6 +715,7 @@ async function placeExit(symbol, positionSide, qty, entryPrice, reason, knownPri
       peakPnl.delete(`${symbol}-${positionSide}`);
       closingPositions.delete(`${symbol}-${positionSide}`);
       reversalPositions.delete(`${symbol}-${positionSide}`);
+      positionInfo.delete(`${symbol}-${positionSide}`);
 
       stats.lastExit = new Date().toISOString();
       log(`${icon} EXIT${revTag} ${positionSide.padEnd(5)} ${symbol.padEnd(18)} [${reason}] price:${(pricePct*100).toFixed(3)}% margin:${pnlPct.toFixed(2)}% | PnL:$${pnl.toFixed(2)} | Daily:$${perf.dailyPnl.toFixed(2)} | W/L:${perf.wins}/${perf.losses}(${wr}%)`);
@@ -890,12 +899,20 @@ async function pollExits() {
         closingPositions.delete(key);
         reversalPositions.delete(key);
         stopOrders.delete(key);
+        const info = positionInfo.get(key);
+        positionInfo.delete(key);
         if (hadStopOrder) {
-          // Exchange stop fired — record as loss, set cooldown, free slot
+          // Exchange stop fired — compute actual loss from stored entry info
           const sym = key.replace(/-(?:LONG|SHORT)$/, "");
           perf.losses++;
-          perf.dailyPnl -= (STOP_LOSS_PCT * 100);  // rough estimate ($)
-          log(`🔒→❌ EXCHANGE STOP FILLED ${key} — loss recorded | W/L:${perf.wins}/${perf.losses}`);
+          if (info) {
+            const margin   = Math.min(Math.abs(info.qty) * info.entry / LEVERAGE, MAX_MARGIN);
+            const approxPnl = -(STOP_LOSS_PCT * margin);   // -stopPct × margin = actual $ loss
+            perf.dailyPnl  += approxPnl;
+            log(`🔒→❌ EXCHANGE STOP FILLED ${key} PnL≈$${approxPnl.toFixed(2)} | W/L:${perf.wins}/${perf.losses}`);
+          } else {
+            log(`🔒→❌ EXCHANGE STOP FILLED ${key} — loss recorded | W/L:${perf.wins}/${perf.losses}`);
+          }
           exitsFired++;
           stopCooldowns.set(sym, Date.now() + COOLDOWN_MS);
           log(`⏸  COOLDOWN SET ${sym} — ${COOLDOWN_MS/60000}min after exchange stop`);
