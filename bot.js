@@ -1,5 +1,5 @@
 /**
- * BingX Demo Trading Bot — MA Swing Trader v4.1 (Hedge Fund AI Edition)
+ * BingX Demo Trading Bot — MA Swing Trader v4.2 (Hedge Fund AI Edition)
  * Target: $200/day | $50,000/year
  *
  * ═══════════════════════════════════════════════════════════════════════════
@@ -31,7 +31,7 @@
  *     SHORT: MA20>SMA30 + same candle pattern + vol≥avg → reversal SELL
  *     MTF  : skipped (counter-trend by design)
  *     Size : 50% × regime multiplier
- *     Stop : -3% (unified with trend)
+ *     Stop : -2% (unified with trend)
  *
  * ═══════════════════════════════════════════════════════════════════════════
  *  EXITS (v4.1)
@@ -46,6 +46,10 @@
  * ═══════════════════════════════════════════════════════════════════════════
  *  CHANGELOG
  * ═══════════════════════════════════════════════════════════════════════════
+ *  v4.2: Bug fixes — cleanup loop iterates peakPnl+stopOrders (was peakPnl
+ *        only, missed exchange stops fired before first poll). Symbol extract
+ *        uses regex. EXIT_POLL_MS fallback 5000→2000. Stop comment -3%→-2%.
+ *        perf.losses tracked for exchange-stopped positions (circuit breaker).
  *  v4.1: Exchange-side STOP_MARKET orders at entry — eliminates polling delay
  *        for stop-loss. cancelExchangeStop before trail exits. Stale-state
  *        cleanup in pollExits detects externally closed positions. Poll 5s→2s.
@@ -90,7 +94,7 @@ const MAX_DAILY       = RULES.limits.max_trades_per_day;
 const ORDER_DELAY_MS  = RULES.limits.api_delay_ms       || 500;
 const FETCH_DELAY_MS  = RULES.limits.fetch_delay_ms     || 200;
 const SCAN_MS         = RULES.limits.scan_interval_ms   || 5000;
-const EXIT_POLL_MS    = RULES.limits.exit_poll_ms        || 5000;
+const EXIT_POLL_MS    = RULES.limits.exit_poll_ms        || 2000;
 const MIN_BODY_PCT    = 0.0002;
 const MAX_MA_DIST_PCT = RULES.entry?.max_ma_distance_pct || 0.005;
 
@@ -869,13 +873,15 @@ async function pollExits() {
     const positions = await getOpenPositions();
 
     // ── Stale-state cleanup: detect positions BingX closed via exchange stop ─
-    // (position no longer in active list but we still have state for it)
+    // Iterates BOTH peakPnl and stopOrders — catches positions where exchange
+    // stop fired before the first poll cycle (peakPnl not yet set for them).
     const activePosKeys = new Set(
       positions
         .filter(p => parseFloat(p.positionAmt || 0) !== 0)
         .map(p => `${p.symbol}-${p.positionSide}`)
     );
-    for (const key of [...peakPnl.keys()]) {
+    const trackedKeys = new Set([...peakPnl.keys(), ...stopOrders.keys()]);
+    for (const key of trackedKeys) {
       if (!activePosKeys.has(key)) {
         const hadStopOrder = stopOrders.has(key);
         peakPnl.delete(key);
@@ -883,11 +889,12 @@ async function pollExits() {
         reversalPositions.delete(key);
         stopOrders.delete(key);
         if (hadStopOrder) {
-          // Exchange stop order fired — counts as an exit, free the slot
-          log(`🔒→✅ EXCHANGE STOP FILLED ${key} — slot freed`);
+          // Exchange stop fired — record as loss, set cooldown, free slot
+          const sym = key.replace(/-(?:LONG|SHORT)$/, "");
+          perf.losses++;
+          perf.dailyPnl -= (STOP_LOSS_PCT * 100);  // rough estimate ($)
+          log(`🔒→❌ EXCHANGE STOP FILLED ${key} — loss recorded | W/L:${perf.wins}/${perf.losses}`);
           exitsFired++;
-          // Set cooldown on the symbol
-          const sym = key.split("-LONG")[0].split("-SHORT")[0];
           stopCooldowns.set(sym, Date.now() + COOLDOWN_MS);
           log(`⏸  COOLDOWN SET ${sym} — ${COOLDOWN_MS/60000}min after exchange stop`);
         }

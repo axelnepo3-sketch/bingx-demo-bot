@@ -1,6 +1,6 @@
 {
   "strategy_name":            "MA SWING TRADER",
-  "version":                  "4.1",
+  "version":                  "4.2",
   "timeframe":                "1m",
   "timeframe_htf":            "5m",
 
@@ -20,7 +20,7 @@
   "watchlist_last_updated":   "auto — refreshed on boot and every midnight UTC",
   "watchlist_refresh":        "on_boot + daily_midnight_utc",
 
-  "blacklist": ["ETHFI-USDT", "DYM-USDT", "SUI-USDT", "WLD-USDT", "10000NAT-USDT", "LAB-USDT", "BSB-USDT", "RUSSEL200-USDT", "EURUSD-USDT", "PAXG-USDT"],
+  "blacklist": ["ETHFI-USDT", "DYM-USDT", "SUI-USDT", "WLD-USDT", "10000NAT-USDT", "LAB-USDT", "BSB-USDT", "RUSSEL200-USDT", "EURUSD-USDT", "PAXG-USDT", "WLFI-USDT"],
 
   "indicators": {
     "MA20":    { "type": "SMA", "length": 20, "source": "close", "timeframe": "1m" },
@@ -214,6 +214,7 @@
   },
 
   "changelog": {
+    "v4.2": "Bug fixes: (1) pollExits cleanup loop now iterates both peakPnl AND stopOrders keys — fixes slot leak when exchange stop fires before first poll cycle; (2) symbol extraction uses regex replace instead of chained split; (3) EXIT_POLL_MS fallback corrected 5000→2000; (4) header comment stop -3%→-2%; (5) perf.losses incremented for exchange-stopped positions so circuit breaker WR% is accurate. WLFI-USDT, PAXG-USDT, EURUSD-USDT added to blacklist.",
     "v4.1": "Exchange-side STOP_MARKET order placed on BingX immediately after every entry — eliminates 5-second polling delay for stop-loss, ensures exact -2% execution. cancelExchangeStop() called before any trail exit to prevent double-close. Stale-state cleanup in pollExits detects positions BingX closed via exchange stop and frees slots + sets cooldown. Poll interval 5s→2s for faster trail detection. Software stop kept as fallback.",
     "v4.0": "Removed fixed take-profit (+8%). Trail activates at +2% (was +4%) — locks in profit every +2% gain and rides winners to maximum. Stop-loss tightened -3%→-2% for all positions (trend + reversal). Exit order: stop-loss → trailing-stop only.",
     "v3.9": "MA20 crossover exit removed entirely. Exits are now stop-loss (-3%) → take-profit (+8%) → trailing-stop (+4%/−2%) only. Eliminates premature closes at < -1% PnL. pollExits simplified from 2-pass to single-pass; checkExit function removed.",
