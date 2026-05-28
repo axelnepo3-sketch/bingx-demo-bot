@@ -1,5 +1,5 @@
 /**
- * BingX Demo Trading Bot — MA Swing Trader v3.9 (Hedge Fund AI Edition)
+ * BingX Demo Trading Bot — MA Swing Trader v4.0 (Hedge Fund AI Edition)
  * Target: $200/day | $50,000/year
  *
  * ═══════════════════════════════════════════════════════════════════════════
@@ -99,10 +99,9 @@ const CANDLE_CONCURRENCY_HTF = 5;    // 5m parallel workers
 
 // ── Risk Management ────────────────────────────────────────────────────────────
 const rm              = RULES.risk_management || {};
-const STOP_LOSS_PCT   = rm.stop_loss_pct           || 0.03;
-const TAKE_PROFIT_PCT = rm.take_profit_pct         || 0.08;
-const TRAIL_ON_PCT    = rm.trail_activate_pct      || 0.04;
-const TRAIL_DIST_PCT  = rm.trail_distance_pct      || 0.02;
+const STOP_LOSS_PCT   = rm.stop_loss_pct           || 0.02;  // -2% hard stop (all positions)
+const TRAIL_ON_PCT    = rm.trail_activate_pct      || 0.02;  // trail activates at +2%
+const TRAIL_DIST_PCT  = rm.trail_distance_pct      || 0.02;  // trail sits 2% below peak
 const DAILY_TARGET    = rm.daily_profit_target_usdt || 200;
 const WR_MIN          = rm.win_rate_min             || 0.40;
 const WR_MIN_TRADES   = rm.win_rate_min_trades      || 10;
@@ -112,7 +111,7 @@ const COOLDOWN_MS     = (rm.stop_cooldown_minutes   || 5)   * 60_000;
 // ── Reversal Config ────────────────────────────────────────────────────────────
 const rev = RULES.reversal_entry || {};
 const REVERSAL_VOL_MULT  = rev.volume_multiplier ?? 1.0;   // 1× = vol ≥ avg
-const REVERSAL_STOP_PCT  = rev.stop_loss_pct     || 0.03;  // unified -3%
+const REVERSAL_STOP_PCT  = rev.stop_loss_pct     || 0.02;  // unified -2%
 const REVERSAL_SIZE_MULT = rev.size_multiplier   || 0.50;  // 50% base size
 
 // ── Hedge Fund: Correlation Control ───────────────────────────────────────────
@@ -589,7 +588,7 @@ async function placeEntry(symbol, signal, score, bal, isReversal = false, regime
       stats.trades++;
       tradeToday++;
       if (isReversal) reversalPositions.add(`${symbol}-${signal}`);
-      log(`✅ SWING${modeTag} ${signal.padEnd(5)} ${symbol.padEnd(18)} qty=${qty} @~${price} ${LEVERAGE}x | score=${score}/10(${(finalMult*100).toFixed(0)}%)${regimeTag} tp=+${TAKE_PROFIT_PCT*100}% stop=-${STOP_LOSS_PCT*100}% | today=${tradeToday}`);
+      log(`✅ SWING${modeTag} ${signal.padEnd(5)} ${symbol.padEnd(18)} qty=${qty} @~${price} ${LEVERAGE}x | score=${score}/10(${(finalMult*100).toFixed(0)}%)${regimeTag} trail≥+${TRAIL_ON_PCT*100}%/−${TRAIL_DIST_PCT*100}% stop=-${STOP_LOSS_PCT*100}% | today=${tradeToday}`);
       return true;
     } else {
       log(`❌ ENTRY FAIL  ${symbol} code=${r?.code} msg=${r?.msg}`);
@@ -851,16 +850,7 @@ async function pollExits() {
         }
         await new Promise(r => setTimeout(r, ORDER_DELAY_MS));
 
-      // ── 2. Take-profit ────────────────────────────────────────────────────
-      } else if (pnlPct >= TAKE_PROFIT_PCT) {
-        const lp = cachedLp || await getLivePrice(sym);
-        log(`🎯 TAKE-PROFIT${revTag} ${side.padEnd(5)} ${sym.padEnd(18)} PnL:${(pnlPct*100).toFixed(2)}% $${pnlUsd.toFixed(2)}`);
-        closingPositions.add(posKey);
-        const ok = await placeExit(sym, side, qty, entry, `take-profit${isRev?"-rev":""}`, lp);
-        if (ok) exitsFired++;
-        await new Promise(r => setTimeout(r, ORDER_DELAY_MS));
-
-      // ── 3. Trailing-stop ──────────────────────────────────────────────────
+      // ── 2. Trailing-stop ──────────────────────────────────────────────────
       } else if (peak >= TRAIL_ON_PCT && pnlPct <= peak - TRAIL_DIST_PCT) {
         const lp = cachedLp || await getLivePrice(sym);
         log(`📉 TRAIL-STOP${revTag}  ${side.padEnd(5)} ${sym.padEnd(18)} peak:${(peak*100).toFixed(2)}% now:${(pnlPct*100).toFixed(2)}%`);
@@ -929,9 +919,8 @@ http.createServer((req, res) => {
     },
     riskManagement: {
       stopLoss:       `-${STOP_LOSS_PCT * 100}% (all positions)`,
-      takeProfit:     `+${TAKE_PROFIT_PCT * 100}%`,
-      trailActivate:  `+${TRAIL_ON_PCT * 100}%`,
-      trailDistance:  `${TRAIL_DIST_PCT * 100}% from peak`,
+      trailActivate:  `+${TRAIL_ON_PCT * 100}% (no fixed TP — trail rides winners)`,
+      trailDistance:  `${TRAIL_DIST_PCT * 100}% below peak`,
       smartCooldown:  `${COOLDOWN_MS/60000}min per symbol after stop-loss`,
       circuitBreaker: paused || "inactive"
     },
@@ -968,7 +957,7 @@ log(`   Regime       : ${marketRegime}`);
 log(`   ── TREND ENTRY    within ${MAX_MA_DIST_PCT*100}% MA20 | 2-bar window | 5m MTF | scored 50/75/100%`);
 log(`   ── REVERSAL ENTRY vol ≥ ${REVERSAL_VOL_MULT}× avg | 50%×regime | stop -${REVERSAL_STOP_PCT*100}% | no MTF`);
 log(`   Stop-loss    : -${STOP_LOSS_PCT*100}% all positions`);
-log(`   Take-profit  : +${TAKE_PROFIT_PCT*100}%  |  Trail: +${TRAIL_ON_PCT*100}% activates, -${TRAIL_DIST_PCT*100}% below peak`);
+log(`   Trail-stop   : activates +${TRAIL_ON_PCT*100}%, trails ${TRAIL_DIST_PCT*100}% below peak | no fixed take-profit — winners ride`);
 log(`   HF: Regime   : VOLATILE=50% · RANGING=75% · with-trend=100% · against-trend=75%`);
 log(`   HF: Corr cap : max ${MAX_MAJOR_POSITIONS} major coins simultaneously`);
 log(`   HF: Cooldown : ${COOLDOWN_MS/60000}-min block per symbol after stop-loss`);

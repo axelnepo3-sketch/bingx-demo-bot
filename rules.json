@@ -1,6 +1,6 @@
 {
   "strategy_name":            "MA SWING TRADER",
-  "version":                  "3.9",
+  "version":                  "4.0",
   "timeframe":                "1m",
   "timeframe_htf":            "5m",
 
@@ -63,10 +63,10 @@
   },
 
   "exit": {
-    "priority_order": "1=stop_loss | 2=take_profit | 3=trailing_stop",
-    "stop_loss":      "-3% unrealized PnL — all positions (trend + reversal unified)",
-    "take_profit":    "+8% swing target (2.67:1 R:R)",
-    "trailing_stop":  "activates at +4%, trails 2% below peak",
+    "priority_order": "1=stop_loss | 2=trailing_stop",
+    "stop_loss":      "-2% unrealized PnL — all positions (trend + reversal unified)",
+    "take_profit":    "REMOVED in v4.0 — no fixed target, trail rides winners to maximum",
+    "trailing_stop":  "activates at +2%, trails 2% below peak — locks in profit every +2% gain",
     "ma20_crossover": "REMOVED in v3.9 — caused premature exits at < -1% PnL before stop-loss fired",
     "order_type":       "MARKET",
     "double_exit_guard":"closingPositions Set prevents race condition"
@@ -142,8 +142,8 @@
     "api_delay_ms":        500,
     "scan_interval_ms":    5000,
     "exit_poll_ms":        5000,
-    "stop_loss_pct":       0.03,
-    "description":         "Max 20 open | 500/day | stop:-3%(all) TP:+8% trail:+4%→2% | rev-vol:1×avg | corr-cap:5 majors | cooldown:5min"
+    "stop_loss_pct":       0.02,
+    "description":         "Max 20 open | 500/day | stop:-2%(all) no-TP trail:+2%→2% | rev-vol:1×avg | corr-cap:5 majors | cooldown:5min"
   },
 
   "targets": {
@@ -160,14 +160,14 @@
     "volume_baseline":      "20-bar avg over prior closed bars (forming bar AND curr bar excluded)",
     "mtf_check":            "SKIPPED",
     "size_multiplier":      0.50,
-    "stop_loss_pct":        0.03,
-    "note":                 "50% base size × regime multiplier. Stop unified at -3%. Vol bar: any candle with vol ≥ 20-bar avg qualifies."
+    "stop_loss_pct":        0.02,
+    "note":                 "50% base size × regime multiplier. Stop unified at -2%. Vol bar: any candle with vol ≥ 20-bar avg qualifies."
   },
 
   "risk_management": {
-    "stop_loss_pct":             0.03,
-    "take_profit_pct":           0.08,
-    "trail_activate_pct":        0.04,
+    "stop_loss_pct":             0.02,
+    "take_profit_pct":           null,
+    "trail_activate_pct":        0.02,
     "trail_distance_pct":        0.02,
     "stop_cooldown_minutes":     5,
     "daily_profit_target_usdt":  200,
@@ -175,7 +175,7 @@
     "win_rate_min":              0.40,
     "win_rate_min_trades":       10,
     "win_rate_pause_minutes":    30,
-    "description":               "Swing: TP+8% | Trail+4%/−2% | Stop-3% ALL | 5-min cooldown | Daily $200 target (tracking only) | 24/7 | Circuit breaker WR<40% → pause 30min"
+    "description":               "No fixed TP | Trail activates +2%, trails 2% below peak | Stop -2% ALL | 5-min cooldown | Daily $200 target (tracking only) | 24/7 | Circuit breaker WR<40% → pause 30min"
   },
 
   "session": {
@@ -214,6 +214,7 @@
   },
 
   "changelog": {
+    "v4.0": "Removed fixed take-profit (+8%). Trail activates at +2% (was +4%) — locks in profit every +2% gain and rides winners to maximum. Stop-loss tightened -3%→-2% for all positions (trend + reversal). Exit order: stop-loss → trailing-stop only.",
     "v3.9": "MA20 crossover exit removed entirely. Exits are now stop-loss (-3%) → take-profit (+8%) → trailing-stop (+4%/−2%) only. Eliminates premature closes at < -1% PnL. pollExits simplified from 2-pass to single-pass; checkExit function removed.",
     "v3.8": "Trend indicator changed: SMA200 → SMA30. MA20 vs SMA30 now determines long/short bias (shorter-term, more responsive crossovers). Candle fetch limit drops from 204 to 34 (faster API). trendGap threshold adjusted 0.5%→0.2% to reflect MA20/SMA30 proximity.",
     "v3.7": "HF AI Edition: auto-watchlist top-100 BingX USDT-perp (boot+midnight refresh), market regime detection (BTC 5m ATR+slope → BULL/BEAR/RANGING/VOLATILE), regime-based sizing, major-coin correlation cap (max 5), portfolio heat logging, 10 scan workers, ATR function, high/low in candles. Bundles v3.6.",
