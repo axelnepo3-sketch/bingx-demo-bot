@@ -1,5 +1,5 @@
 /**
- * BingX Demo Trading Bot — MA Swing Trader v4.5 (Hedge Fund AI Edition)
+ * BingX Demo Trading Bot — MA Swing Trader v4.6 (Hedge Fund AI Edition)
  * Target: $200/day | $50,000/year
  *
  * ═══════════════════════════════════════════════════════════════════════════
@@ -46,6 +46,12 @@
  * ═══════════════════════════════════════════════════════════════════════════
  *  CHANGELOG
  * ═══════════════════════════════════════════════════════════════════════════
+ *  v4.6: Continuous slot-fill — levCache skips redundant leverage calls per
+ *        symbol/side; placeExchangeStop is fire-and-forget (non-blocking entry);
+ *        scheduleFillScan sets pendingFillScan when scan is busy; scanEntry
+ *        finally processes pendingFillScan; auto-refill triggered at end of
+ *        Stage 2 when slots still free; trail count in scan-done log; daily
+ *        reset clears levCache+pendingFillScan; scan_interval_ms 5000→2000.
  *  v4.5: USDT-only enforcement — USDT filter added to initial WATCHLIST load,
  *        fetchTopSymbols fallback, scanEntry toCheck, and hard guard in
  *        placeEntry. EURUSD + EURUSD-USDT both blacklisted.
@@ -225,8 +231,10 @@ const reversalPositions = new Set();   // counter-trend positions (for log taggi
 const stopCooldowns     = new Map();   // symbol → cooldown end timestamp
 const stopOrders        = new Map();   // `${sym}-${side}` → BingX stop orderId
 const positionInfo      = new Map();   // `${sym}-${side}` → {entry, qty} for exchange-stop PnL calc
+const levCache          = new Set();   // `${sym}-${side}` → leverage already set, skip redundant call
 let   winRatePauseUntil = 0;
 let   fillScanTimer     = null;
+let   pendingFillScan   = false;       // fill scan was requested while scanning was busy
 
 // ── HF: Market Regime ─────────────────────────────────────────────────────────
 let marketRegime    = "UNKNOWN";   // BULL_TREND | BEAR_TREND | RANGING | VOLATILE
@@ -251,6 +259,8 @@ function checkDailyReset() {
     stopCooldowns.clear();
     stopOrders.clear();
     positionInfo.clear();
+    levCache.clear();
+    pendingFillScan   = false;
     log(`📅 Daily reset — all counters cleared`);
     // Refresh watchlist and regime on new day (non-blocking)
     refreshWatchlist().catch(e => log(`WARN: midnight watchlist refresh failed: ${e.message}`));
@@ -665,7 +675,11 @@ async function placeEntry(symbol, signal, score, bal, isReversal = false, regime
     const modeTag      = isReversal ? " ⚡REV" : "";
     const regimeTag    = regimeAdj < 1.0 ? ` [regime:${(regimeAdj*100).toFixed(0)}%]` : "";
 
-    try { await POST("/openApi/swap/v2/trade/leverage", { symbol, side: signal, leverage: LEVERAGE }); } catch {}
+    const levKey = `${symbol}-${signal}`;
+    if (!levCache.has(levKey)) {
+      try { await POST("/openApi/swap/v2/trade/leverage", { symbol, side: signal, leverage: LEVERAGE }); } catch {}
+      levCache.add(levKey);
+    }
 
     const r = await POST("/openApi/swap/v2/trade/order", {
       symbol, side, positionSide, type: "MARKET", quantity: qty
@@ -677,8 +691,8 @@ async function placeEntry(symbol, signal, score, bal, isReversal = false, regime
       if (isReversal) reversalPositions.add(`${symbol}-${signal}`);
       positionInfo.set(`${symbol}-${signal}`, { entry: price, qty });  // for exchange-stop PnL calc
       log(`✅ SWING${modeTag} ${signal.padEnd(5)} ${symbol.padEnd(18)} qty=${qty} @~${price} ${LEVERAGE}x | score=${score}/10(${(finalMult*100).toFixed(0)}%)${regimeTag} trail≥+${TRAIL_ON_PCT*100}%/−${TRAIL_DIST_PCT*100}% stop=-${STOP_LOSS_PCT*100}% | today=${tradeToday}`);
-      // Place exchange-side STOP_MARKET immediately — no polling delay
-      await placeExchangeStop(symbol, signal, qty, price);
+      // Place exchange-side STOP_MARKET immediately — fire-and-forget (non-blocking)
+      placeExchangeStop(symbol, signal, qty, price).catch(e => log(`WARN: bg stop-order ${symbol}: ${e.message}`));
       return true;
     } else {
       log(`❌ ENTRY FAIL  ${symbol} code=${r?.code} msg=${r?.msg}`);
@@ -743,6 +757,11 @@ async function placeExit(symbol, positionSide, qty, entryPrice, reason, knownPri
 
 // ── Slot-fill scan ─────────────────────────────────────────────────────────────
 function scheduleFillScan() {
+  // If a scan is already running, flag it to re-run when it finishes
+  if (scanning) {
+    pendingFillScan = true;
+    return;
+  }
   if (fillScanTimer) clearTimeout(fillScanTimer);
   fillScanTimer = setTimeout(() => {
     fillScanTimer = null;
@@ -867,14 +886,25 @@ async function scanEntry(reason = "interval") {
       }
     }
 
+    // Auto-refill: if slots remain open, schedule another scan immediately
+    if (openCount < MAX_OPEN) {
+      scheduleFillScan();
+    }
+
     if (signals > 0 || reason !== "interval") {
-      log(`═ SCAN DONE | fetch:${fetchMs}ms(1m+5m‖) | signals=${signals} blocked=${blocked} | trades_today=${tradeToday} | PnL:$${perf.dailyPnl.toFixed(2)}`);
+      const trailActive = [...peakPnl.values()].filter(p => p >= TRAIL_ON_PCT).length;
+      log(`═ SCAN DONE | fetch:${fetchMs}ms(1m+5m‖) | signals=${signals} blocked=${blocked} | trades_today=${tradeToday} | PnL:$${perf.dailyPnl.toFixed(2)} | trailing=${trailActive}`);
     }
   } catch (e) {
     stats.errors++;
     log(`SCAN CRASH: ${e.message}`);
   } finally {
     scanning = false;
+    // If a fill scan was requested while we were busy, fire it now
+    if (pendingFillScan) {
+      pendingFillScan = false;
+      setTimeout(() => scanEntry("slot-fill"), 500);
+    }
   }
 }
 
