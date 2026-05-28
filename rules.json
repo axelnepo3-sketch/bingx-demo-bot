@@ -1,6 +1,6 @@
 {
   "strategy_name":            "MA SWING TRADER",
-  "version":                  "4.2",
+  "version":                  "4.3",
   "timeframe":                "1m",
   "timeframe_htf":            "5m",
 
@@ -55,8 +55,8 @@
   },
 
   "entry": {
-    "long":  "SWING LONG: GREEN + prev RED + close≥MA20 + within 0.5% + 1m-MA20>SMA30 + 5m-close≥5m-MA20 + RSI<70",
-    "short": "SWING SHORT: RED + prev GREEN + close≤MA20 + within 0.5% + 1m-MA20<SMA30 + 5m-close≤5m-MA20 + RSI>30",
+    "long":  "SWING LONG: GREEN + prev RED + close≥MA20 + within 0.5% + 1m-MA20>SMA30 + 5m-close≥5m-MA20 + RSI<30 (oversold)",
+    "short": "SWING SHORT: RED + prev GREEN + close≤MA20 + within 0.5% + 1m-MA20<SMA30 + 5m-close≤5m-MA20 + RSI>70 (overbought)",
     "order_type":          "MARKET",
     "max_ma_distance_pct": 0.005,
     "freshness_candles":   2
@@ -153,8 +153,8 @@
 
   "reversal_entry": {
     "enabled":              true,
-    "long_in_short_bias":   "1m MA20<SMA30 + GREEN + prev RED + close≥MA20 ±0.5% + RSI<70 + vol≥1× avg → LONG reversal",
-    "short_in_long_bias":   "1m MA20>SMA30 + RED + prev GREEN + close≤MA20 ±0.5% + RSI>30 + vol≥1× avg → SHORT reversal",
+    "long_in_short_bias":   "1m MA20<SMA30 + GREEN + prev RED + close≥MA20 ±0.5% + RSI<30 + vol≥1× avg → LONG reversal",
+    "short_in_long_bias":   "1m MA20>SMA30 + RED + prev GREEN + close≤MA20 ±0.5% + RSI>70 + vol≥1× avg → SHORT reversal",
     "volume_multiplier":    1.0,
     "volume_period":        20,
     "volume_baseline":      "20-bar avg over prior closed bars (forming bar AND curr bar excluded)",
@@ -214,6 +214,7 @@
   },
 
   "changelog": {
+    "v4.3": "RSI entry filter changed: LONG now requires RSI<30 (oversold only), SHORT requires RSI>70 (overbought only). Trades only at RSI extremes — higher quality entries, avoids mid-range noise. Applies to both trend and reversal entries.",
     "v4.2": "Bug fixes: (1) pollExits cleanup loop now iterates both peakPnl AND stopOrders keys — fixes slot leak when exchange stop fires before first poll cycle; (2) symbol extraction uses regex replace instead of chained split; (3) EXIT_POLL_MS fallback corrected 5000→2000; (4) header comment stop -3%→-2%; (5) perf.losses incremented for exchange-stopped positions so circuit breaker WR% is accurate. WLFI-USDT, PAXG-USDT, EURUSD-USDT added to blacklist.",
     "v4.1": "Exchange-side STOP_MARKET order placed on BingX immediately after every entry — eliminates 5-second polling delay for stop-loss, ensures exact -2% execution. cancelExchangeStop() called before any trail exit to prevent double-close. Stale-state cleanup in pollExits detects positions BingX closed via exchange stop and frees slots + sets cooldown. Poll interval 5s→2s for faster trail detection. Software stop kept as fallback.",
     "v4.0": "Removed fixed take-profit (+8%). Trail activates at +2% (was +4%) — locks in profit every +2% gain and rides winners to maximum. Stop-loss tightened -3%→-2% for all positions (trend + reversal). Exit order: stop-loss → trailing-stop only.",

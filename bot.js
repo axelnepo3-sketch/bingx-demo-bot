@@ -1,5 +1,5 @@
 /**
- * BingX Demo Trading Bot — MA Swing Trader v4.2 (Hedge Fund AI Edition)
+ * BingX Demo Trading Bot — MA Swing Trader v4.3 (Hedge Fund AI Edition)
  * Target: $200/day | $50,000/year
  *
  * ═══════════════════════════════════════════════════════════════════════════
@@ -22,9 +22,9 @@
  * ═══════════════════════════════════════════════════════════════════════════
  *  A) TREND-FOLLOWING (primary)
  *     LONG : 1m MA20>SMA30 + 5m close≥5m-MA20 + GREEN candle + prev RED
- *            + close≥MA20 ±0.5% + RSI<70
+ *            + close≥MA20 ±0.5% + RSI<30 (oversold)
  *     SHORT: 1m MA20<SMA30 + 5m close≤5m-MA20 + RED candle + prev GREEN
- *            + close≤MA20 ±0.5% + RSI>30
+ *            + close≤MA20 ±0.5% + RSI>70 (overbought)
  *
  *  B) COUNTER-TREND REVERSAL (vol ≥ 1× prior avg)
  *     LONG : MA20<SMA30 + same candle pattern + vol≥avg → reversal BUY
@@ -46,6 +46,8 @@
  * ═══════════════════════════════════════════════════════════════════════════
  *  CHANGELOG
  * ═══════════════════════════════════════════════════════════════════════════
+ *  v4.3: RSI entry filter changed — LONG requires RSI<30 (oversold), SHORT
+ *        requires RSI>70 (overbought). Trades only at extremes, not midrange.
  *  v4.2: Bug fixes — cleanup loop iterates peakPnl+stopOrders (was peakPnl
  *        only, missed exchange stops fired before first poll). Symbol extract
  *        uses regex. EXIT_POLL_MS fallback 5000→2000. Stop comment -3%→-2%.
@@ -367,8 +369,8 @@ function checkEntry(candles1m, candles5m = null) {
   const currRed   = curr.close < curr.open;
   const prevRed   = prev.close < prev.open;
   const prevGreen = prev.close > prev.open;
-  const rsiOK_long  = !rsiVal || rsiVal < 70;
-  const rsiOK_short = !rsiVal || rsiVal > 30;
+  const rsiOK_long  = !rsiVal || rsiVal < 30;   // oversold → LONG
+  const rsiOK_short = !rsiVal || rsiVal > 70;   // overbought → SHORT
 
   const avgVol   = volAvg(candles1m);
   const currVol  = curr.volume || 0;
