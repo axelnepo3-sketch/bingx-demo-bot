@@ -1,6 +1,6 @@
 {
   "strategy_name":            "MA SWING TRADER",
-  "version":                  "4.4",
+  "version":                  "4.5",
   "timeframe":                "1m",
   "timeframe_htf":            "5m",
 
@@ -20,7 +20,7 @@
   "watchlist_last_updated":   "auto — refreshed on boot and every midnight UTC",
   "watchlist_refresh":        "on_boot + daily_midnight_utc",
 
-  "blacklist": ["ETHFI-USDT", "DYM-USDT", "SUI-USDT", "WLD-USDT", "10000NAT-USDT", "LAB-USDT", "BSB-USDT", "RUSSEL200-USDT", "EURUSD-USDT", "PAXG-USDT", "WLFI-USDT"],
+  "blacklist": ["ETHFI-USDT", "DYM-USDT", "SUI-USDT", "WLD-USDT", "10000NAT-USDT", "LAB-USDT", "BSB-USDT", "RUSSEL200-USDT", "EURUSD-USDT", "EURUSD", "PAXG-USDT", "WLFI-USDT"],
 
   "indicators": {
     "MA20":    { "type": "SMA", "length": 20, "source": "close", "timeframe": "1m" },
@@ -214,6 +214,7 @@
   },
 
   "changelog": {
+    "v4.5": "USDT-only enforcement at 4 layers: initial WATCHLIST load, fetchTopSymbols fallback, scanEntry toCheck filter, and hard guard in placeEntry (non-USDT or blacklisted symbols are blocked before any API call). EURUSD added to blacklist (EURUSD-USDT already present).",
     "v4.4": "Bug fixes: (1) positionInfo Map tracks entry price+qty per position — exchange-stop PnL now computed accurately (was flat $2 regardless of size); (2) RSI scoring bonus was dead code (40-60 zone impossible with RSI<30/>70 filter) — fixed to reward deep extremes RSI<25 or RSI>75 (+1pt), max score 10 restored; (3) positionInfo.delete added to placeExit to prevent Map accumulation.",
     "v4.3": "RSI entry filter changed: LONG now requires RSI<30 (oversold only), SHORT requires RSI>70 (overbought only). Trades only at RSI extremes — higher quality entries, avoids mid-range noise. Applies to both trend and reversal entries.",
     "v4.2": "Bug fixes: (1) pollExits cleanup loop now iterates both peakPnl AND stopOrders keys — fixes slot leak when exchange stop fires before first poll cycle; (2) symbol extraction uses regex replace instead of chained split; (3) EXIT_POLL_MS fallback corrected 5000→2000; (4) header comment stop -3%→-2%; (5) perf.losses incremented for exchange-stopped positions so circuit breaker WR% is accurate. WLFI-USDT, PAXG-USDT, EURUSD-USDT added to blacklist.",

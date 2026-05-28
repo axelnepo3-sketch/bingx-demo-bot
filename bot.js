@@ -1,5 +1,5 @@
 /**
- * BingX Demo Trading Bot — MA Swing Trader v4.4 (Hedge Fund AI Edition)
+ * BingX Demo Trading Bot — MA Swing Trader v4.5 (Hedge Fund AI Edition)
  * Target: $200/day | $50,000/year
  *
  * ═══════════════════════════════════════════════════════════════════════════
@@ -46,6 +46,9 @@
  * ═══════════════════════════════════════════════════════════════════════════
  *  CHANGELOG
  * ═══════════════════════════════════════════════════════════════════════════
+ *  v4.5: USDT-only enforcement — USDT filter added to initial WATCHLIST load,
+ *        fetchTopSymbols fallback, scanEntry toCheck, and hard guard in
+ *        placeEntry. EURUSD + EURUSD-USDT both blacklisted.
  *  v4.4: Bug fixes — (1) positionInfo Map added: stores {entry,qty} at entry,
  *        used by exchange-stop cleanup to compute accurate PnL (was flat $2);
  *        (2) RSI scoring bonus fixed: was rsiVal 40-60 (dead code since filter
@@ -142,7 +145,7 @@ const MAJOR_COINS = new Set([
 const MAX_MAJOR_POSITIONS = RULES.hf_agent?.max_major_positions || 5;
 
 const BLACKLIST = new Set(RULES.blacklist || []);
-let   WATCHLIST = (RULES.watchlist || []).filter(s => !BLACKLIST.has(s));  // replaced on boot
+let   WATCHLIST = (RULES.watchlist || []).filter(s => s.endsWith("-USDT") && !BLACKLIST.has(s));  // replaced on boot
 const PORT      = process.env.PORT || 3000;
 
 const CANDLE_MS = {
@@ -511,7 +514,7 @@ async function fetchTopSymbols(n = MAX_WATCHLIST) {
     return filtered;
   } catch (e) {
     log(`WARN: auto-watchlist fetch failed (${e.message}) — using rules.json fallback`);
-    return (RULES.watchlist || []).filter(s => !BLACKLIST.has(s));
+    return (RULES.watchlist || []).filter(s => s.endsWith("-USDT") && !BLACKLIST.has(s));
   }
 }
 
@@ -640,6 +643,11 @@ async function cancelExchangeStop(symbol, positionSide) {
 // ── Place entry ────────────────────────────────────────────────────────────────
 async function placeEntry(symbol, signal, score, bal, isReversal = false, regimeAdj = 1.0) {
   try {
+    // Hard guard — only USDT perpetuals allowed, never trade blacklisted symbols
+    if (!symbol.endsWith("-USDT") || BLACKLIST.has(symbol)) {
+      log(`🚫 BLOCKED ${symbol} — non-USDT or blacklisted symbol`);
+      return false;
+    }
     const price = await getLivePrice(symbol);
     if (!price) { log(`SKIP ${symbol} — no live price`); return false; }
 
@@ -767,7 +775,7 @@ async function scanEntry(reason = "interval") {
     if (bal <= 0) { log(`⏸  Balance=0, skipping scan`); return; }
 
     const busy    = new Set(positions.map(p => p.symbol));
-    const toCheck = WATCHLIST.filter(s => !busy.has(s));
+    const toCheck = WATCHLIST.filter(s => s.endsWith("-USDT") && !BLACKLIST.has(s) && !busy.has(s));
     if (!toCheck.length) return;
 
     // HF: portfolio heat
