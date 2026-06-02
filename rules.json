@@ -1,6 +1,7 @@
 {
   "strategy_name":            "MA SWING TRADER",
   "version":                  "4.6",
+  "paused":                   true,
   "timeframe":                "1m",
   "timeframe_htf":            "5m",
 

@@ -150,6 +150,7 @@ const MAJOR_COINS = new Set([
 ]);
 const MAX_MAJOR_POSITIONS = RULES.hf_agent?.max_major_positions || 5;
 
+const PAUSED    = RULES.paused === true;   // set "paused": true in rules.json to halt all trading
 const BLACKLIST = new Set(RULES.blacklist || []);
 let   WATCHLIST = (RULES.watchlist || []).filter(s => s.endsWith("-USDT") && !BLACKLIST.has(s));  // replaced on boot
 const PORT      = process.env.PORT || 3000;
@@ -774,6 +775,7 @@ function scheduleFillScan() {
 // Stage 2 : evaluate signals with regime, correlation, cooldown checks
 let scanning = false;
 async function scanEntry(reason = "interval") {
+  if (PAUSED) { if (reason === "boot") log(`⏸  BOT PAUSED — set "paused": false in rules.json to resume`); return; }
   if (scanning) return;
   scanning = true;
   try {
@@ -913,6 +915,7 @@ async function scanEntry(reason = "interval") {
 //           3=software stop fallback (backup if stop order failed to place)
 let polling = false;
 async function pollExits() {
+  if (PAUSED)  return;
   if (polling) return;
   polling = true;
   let exitsFired = 0;
@@ -1051,7 +1054,7 @@ http.createServer((req, res) => {
 
   res.writeHead(200, { "Content-Type": "application/json" });
   res.end(JSON.stringify({
-    status:    paused ? `⚠️ ${paused}` : "🟢 running 24/7",
+    status:    PAUSED ? "⏸ PAUSED — set paused:false in rules.json to resume" : paused ? `⚠️ ${paused}` : "🟢 running 24/7",
     strategy:  `${RULES.strategy_name} v${RULES.version} | MA${MA_PERIOD}/SMA${SMA_PERIOD}/RSI${RSI_PERIOD} | ${TIMEFRAME}+${TIMEFRAME_HTF}MTF`,
     uptime:    Math.round(process.uptime()) + "s",
     trades:    stats.trades,
